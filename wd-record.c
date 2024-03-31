@@ -62,6 +62,31 @@ struct wav {
   int16_t BlockAlign;
   int16_t BitsPerSample;
 
+  // 'auxi' chunk to pass center frequency to SDR Console
+  // http://www.moetronix.com/files/spectravue.pdf had some details on this chunk
+  // and https://sdrplay.com/resources/IQ/ft4.zip
+  // has some .wav files with a center frequency that SDR Console can use
+  char AuxID[4];
+  int32_t AuxSize;
+  int16_t StartYear;
+  int16_t StartMon;
+  int16_t StartDOW;
+  int16_t StartDay;
+  int16_t StartHour;
+  int16_t StartMinute;
+  int16_t StartSecond;
+  int16_t StartMillis;
+  int16_t StopYear;
+  int16_t StopMon;
+  int16_t StopDOW;
+  int16_t StopDay;
+  int16_t StopHour;
+  int16_t StopMinute;
+  int16_t StopSecond;
+  int16_t StopMillis;
+  int32_t CenterFrequency;
+  char AuxUknown[128];
+
   char SubChunk2ID[4];
   int32_t Subchunk2Size;
 };
@@ -95,6 +120,10 @@ int          Searching_for_first_minute = 1;    // 1 => don't write to wav file 
 int          Samples_per_second = 0;            // If non-zero from -S RATE arg, overrides the sp->samprate value which is infered from sample size
 uint32_t     sample_number_of_first_sample_in_current_wav_file = 0;   // The timestamp in the radiod RTP files is actually the sample number 
 
+int Channels_override;
+static uint32_t Center_frequency=1115000;
+static uint32_t Minutes_per_file=1;
+
 char const *App_path;
 int verbosity;
 int Keep_wav;
@@ -123,7 +152,7 @@ int main(int argc,char *argv[]){
 
   // Defaults
   int c;
-  while((c = getopt(argc,argv,"d:l:s:S:vk1V")) != EOF){
+  while((c = getopt(argc,argv,"d:l:s:S:vk1Vc:f:m:")) != EOF){
     switch(c){
     case 'V':
       VERSION();
@@ -152,8 +181,17 @@ int main(int argc,char *argv[]){
     case 'S':
       Samples_per_second = strtol(optarg,NULL,0);
       break;
+    case 'c':
+      Channels_override = strtol(optarg,NULL,0);
+      break;
+    case 'f':
+      Center_frequency = strtoul(optarg,NULL,0);
+      break;
+    case 'm':
+      Minutes_per_file  = strtoul(optarg,NULL,0);
+      break;
     default:
-      fprintf(stderr,"Usage: %s [-l locale] [-v] [-k] [-d recdir] [-S samples_per_second] PCM_multicast_address\n",argv[0]);
+      fprintf(stderr,"Usage: %s [-l locale] [-v] [-k] [-d recdir] [-S samples_per_second] [-c channels] [-m minutes/file] PCM_multicast_address\n",argv[0]);
       exit(1);
       break;
     }
@@ -218,7 +256,7 @@ void closedown(int a){
   exit(1);  // Will call cleanup()
 }
 
-// Retuns the sample offset of the rtp.timestam or -1 if it is earlier than 
+// Retuns the sample offset of the rtp.timestamp or -1 if it is earlier than
 #define WD_MAX_SAMPLES_PER_MINUTE 16000
 #define MAX_U32_BIT_VALUE 0xffffffff
 #define FIRST_WRAP_SAMPLE ( MAX_U32_BIT_VALUE - WD_MAX_SAMPLES_PER_MINUTE )
@@ -269,7 +307,7 @@ void test_calculateAbsoluteDifference() {
 void input_loop(){
     int64_t loop_count = INT64_MAX - 1;
     int last_flush_second = -1;                // Flush all streams once per second
-    int last_data_second = -1;        // Used in search for the first data packet to be put in the first wav fileafter tansition from second 50 to second 0
+    int last_data_second = -1;        // Used in search for the first data packet to be put in the first wav file after transition from second 50 to second 0
 
    test_calculateAbsoluteDifference();
    // exit (0);
@@ -403,13 +441,13 @@ void input_loop(){
                         Searching_for_first_minute = 1;
                         continue;
                     }
-                    int      samples_per_minute =  sp->samprate * 60;
+                    int      samples_per_minute =  sp->samprate * 60 * Minutes_per_file;
                     uint32_t sample_number_of_first_sample_of_next_wav_file = sp->first_sample_number + samples_per_minute;
                     if ( sample_offset_in_current_wav_file >= samples_per_minute ) {
                         int sample_offset_in_next_wav_file = sample_offset_in_current_wav_file - samples_per_minute;
                         if ( verbosity > 2 ) {
-                            fprintf(stderr, "input_loop(): after writing %7lld samples to wav file which should have %d samples in it, closing wav file because this new rtp packet is for offset %d in the next wav file.  rtp.timestamp=%u >= sample_number_of_first_sample_in_current_wav_file=%u\n",
-                                    (long long)sp->SamplesWritten, samples_per_minute, sample_offset_in_next_wav_file, rtp.timestamp, sample_number_of_first_sample_in_current_wav_file );
+                            fprintf(stderr, "input_loop(): after writing %7ld samples to wav file which should have %d samples in it, closing wav file because this new rtp packet is for offset %d in the next wav file.  rtp.timestamp=%u >= sample_number_of_first_sample_in_current_wav_file=%u\n",
+                                    sp->SamplesWritten, samples_per_minute, sample_offset_in_next_wav_file, rtp.timestamp, sample_number_of_first_sample_in_current_wav_file );
                         }
                         close_session(&sp);
                         sp = NULL;
@@ -470,7 +508,7 @@ void input_loop(){
                             sp->first_sample_number = rtp.timestamp;
                             if ( verbosity > 2 ) {
                                 fprintf(stderr, "input_loop(): found first data after transition from second 59 to second 0, so sp->first_sample_number=%u.  Record to this wav file until we receive a pkt with timestamp >= %u\n", 
-                                        sp->first_sample_number, sp->first_sample_number + ( sp->samprate * 60 ) );
+                                        sp->first_sample_number, sp->first_sample_number + ( sp->samprate * 60 * Minutes_per_file) );
                             }
                             Searching_for_first_minute = 0;
                         }
@@ -538,7 +576,7 @@ struct session *create_session(
     int  wav_start_second = wav_start_epoch % 60;
     if ( Searching_for_first_minute == 1 ) {
         // If this is the first wav file, then samples will start being written at the begining of the next minute
-        // So the filname should reflect that future time
+        // So the filename should reflect that future time
         filename_epoch = wav_start_epoch + 60 - wav_start_second;
         if ( verbosity > 2 ) {
             fprintf( stderr,"create_session(): changing the filename of the first wav file to be derived from epoch=%d rather than from wav_start_epoch=%d\n", filename_epoch, wav_start_epoch);
@@ -546,7 +584,7 @@ struct session *create_session(
     } else {
         if ( wav_start_second != 0 ) {
             if( verbosity > 1 ) {
-            fprintf( stderr,"create_session(): ERRROR: (INTERNAL) wav_start_epoch=%d is for second %d, not for an expected second 0\n", wav_start_epoch, wav_start_second );
+            fprintf( stderr,"create_session(): ERROR: (INTERNAL) wav_start_epoch=%d is for second %d, not for an expected second 0\n", wav_start_epoch, wav_start_second );
             }
         }
         if( verbosity > 1 ) {
@@ -564,10 +602,43 @@ struct session *create_session(
     sp->ssrc = rtp->ssrc;
 
     sp->channels = channels_from_pt(sp->type);
+
+    if ( Channels_override > 0 ) {
+      sp->channels = Channels_override;
+    }
+
+    if ( sp->channels == 0 ) {
+      fprintf(stderr, "Unknown number of channels...must specify with -c\n");
+      FREE(sp);
+      exit(1);
+      return NULL;
+    }
+
     if ( Samples_per_second != 0 ) {
-        sp->samprate = Samples_per_second;
+      sp->samprate = Samples_per_second;
     } else {
-        sp->samprate = samprate_from_pt(sp->type);
+      sp->samprate = samprate_from_pt(sp->type);
+    }
+
+    if ( sp->samprate == 0 ) {
+      fprintf(stderr, "Unknown sample rate...must specify with -S\n");
+      FREE(sp);
+      exit(1);
+      return NULL;
+    }
+
+    if ( verbosity > 0) {
+      uint64_t estimated_file_size = ((uint64_t)(sp->channels) * (sp->samprate) * 2ul * 60ul * Minutes_per_file) + 216ul;
+
+      if (estimated_file_size >= (1llu << 32)) {
+        fprintf(stderr, "Warning: file size of %lu bytes will probably exceed 4 GB\n", estimated_file_size);
+      }
+      else if (estimated_file_size >= (1llu << 31)) {
+        fprintf(stderr, "Warning: file size of %lu bytes will probably exceed 2 GB\n", estimated_file_size);
+      }
+      else {
+        fprintf(stderr, "Estimated file size of %lu bytes\n", estimated_file_size);
+      }
     }
 
     time_t start_time_sec = filename_epoch;
@@ -633,6 +704,21 @@ struct session *create_session(
     sp->header.BitsPerSample = 16;
     memcpy(sp->header.SubChunk2ID,"data",4);
     sp->header.Subchunk2Size = 0xffffffff; // Temporary
+
+    // fill in the auxi chunk (start time, center frequency)
+    memcpy(sp->header.AuxID, "auxi", 4);
+    sp->header.AuxSize=164;
+    sp->header.StartYear=tm->tm_year+1900;
+    sp->header.StartMon=tm->tm_mon+1;
+    sp->header.StartDOW=tm->tm_wday;
+    sp->header.StartDay=tm->tm_mday;
+    sp->header.StartHour=tm->tm_hour;
+    sp->header.StartMinute=tm->tm_min;
+    sp->header.StartSecond=tm->tm_sec;
+    sp->header.StartMillis=0;
+    sp->header.CenterFrequency=Center_frequency;
+    memset(sp->header.AuxUknown, 0, 128);
+
     fwrite(&sp->header,sizeof(sp->header),1,sp->fp);
     fflush(sp->fp); // get at least the header out there
 
@@ -659,7 +745,6 @@ void flush_session(struct session **p){
 	   (float)sp->TotalFileSamples / sp->samprate);
   
   if(sp->fp != NULL){
-    // Get final file size, write .wav header with sizes
     fflush(sp->fp);
   }
   return;
@@ -684,6 +769,20 @@ void close_session(struct session **p){
     fstat(fileno(sp->fp),&statbuf);
     sp->header.ChunkSize = statbuf.st_size - 8;
     sp->header.Subchunk2Size = statbuf.st_size - sizeof(sp->header);
+
+    // write end time into the auxi chunk
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME,&now);
+    struct tm const * const tm = gmtime(&now.tv_sec);
+    sp->header.StopYear=tm->tm_year+1900;
+    sp->header.StopMon=tm->tm_mon+1;
+    sp->header.StopDOW=tm->tm_wday;
+    sp->header.StopDay=tm->tm_mday;
+    sp->header.StopHour=tm->tm_hour;
+    sp->header.StopMinute=tm->tm_min;
+    sp->header.StopSecond=tm->tm_sec;
+    sp->header.StopMillis=(int16_t)(now.tv_nsec / 1000000);
+
     rewind(sp->fp);
     fwrite(&sp->header,sizeof(sp->header),1,sp->fp);
     fflush(sp->fp);
