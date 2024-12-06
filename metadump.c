@@ -45,6 +45,7 @@ static char const *Radio;
 static uint32_t Ssrc;
 static int Status_packets;
 static int64_t Last_status_time;
+struct sockaddr_storage Metadata_dest_socket;
 
 static char Locale[256] = "en_US.UTF-8";
 int Verbose;
@@ -56,11 +57,12 @@ static struct option Options[] = {
   {"ssrc", required_argument, NULL, 's'},
   {"count", required_argument, NULL, 'c'},
   {"interval", required_argument, NULL, 'i'},
-  {"verbose", no_argument, NULL, 'v'},  
+  {"verbose", no_argument, NULL, 'v'},
   {"newline", no_argument, NULL, 'n'},
   {"radio", required_argument, NULL, 'r'},
   {"locale", required_argument, NULL, 'l'},
   {"version", no_argument, NULL, 'V'},
+  {"retries", required_argument, NULL, 'R'},
   {NULL, 0, NULL, 0},
 };
 
@@ -69,6 +71,7 @@ void *input_thread(void *);
 
 int main(int argc,char *argv[]){
   App_path = argv[0];
+  int retries = 0;
   int c;
 
   while((c = getopt_long(argc,argv,Optstring,Options,NULL)) != -1){
@@ -101,6 +104,9 @@ int main(int argc,char *argv[]){
     case 'l':
       strlcpy(Locale,optarg,sizeof(Locale));
       break;
+    case 'R':
+      retries = labs(strtol(optarg,NULL,0));
+      break;
      default:
       usage();
       break;
@@ -130,7 +136,10 @@ int main(int argc,char *argv[]){
 
   if(Verbose)
     fprintf(stdout,"Resolving %s\n",Radio);
-  resolve_mcast(Radio,&sock,DEFAULT_STAT_PORT,iface,sizeof(iface));
+  if(resolve_mcast(Radio,&sock,DEFAULT_STAT_PORT,iface,sizeof(iface),retries) == -1){
+    fprintf(stdout,"Can't resolve %s\n",Radio);
+    exit(EX_UNAVAILABLE);
+  }    
   if(Verbose){
     char result[1024];
     fprintf(stdout,"Listening on %s\n",formataddr(result,sizeof(result),&sock));
@@ -170,13 +179,13 @@ int main(int argc,char *argv[]){
     encode_int(&bp,OUTPUT_SSRC,Ssrc);
     encode_eol(&bp);
     int cmd_len = bp - cmd_buffer;
-    
+
     if(Verbose)
       fprintf(stdout,"Send poll\n");
     if(send(Control_sock, cmd_buffer, cmd_len, 0) != cmd_len){
       perror("command send");
       exit(1);
-    }      
+    }
     last_command_time = gps_time_ns();
     // usleep takes usleep_t but it's unsigned and the while loop will hang
     int32_t sleep_time = Interval / 1000; // nanosec -> microsec
@@ -187,7 +196,7 @@ int main(int argc,char *argv[]){
       if(Last_status_time > last_command_time)
 	sleep_time = (Last_status_time + Interval - gps_time_ns()) / 1000;
       else
-	sleep_time = (last_command_time + Interval - gps_time_ns()) / 1000;	
+	sleep_time = (last_command_time + Interval - gps_time_ns()) / 1000;
     }
   }
   exit(EX_OK); // can't reach
@@ -195,12 +204,12 @@ int main(int argc,char *argv[]){
 
 
 void usage(void){
-  fprintf(stdout,"%s [-s|--ssrc <ssrc>|-a|--all] [-c|--count n] [-i|--interval f] [-v|--verbose] [-n|--newline] [-l|--locale] [ -r|--radio] control-channel\n",App_path);
+  fprintf(stdout,"%s [-R|--retries count] [-s|--ssrc <ssrc>|-a|--all] [-c|--count n] [-i|--interval f] [-v|--verbose] [-n|--newline] [-l|--locale] [ -r|--radio] control-channel\n",App_path);
 }
 
 // Process incoming packets
 void *input_thread(void *p){
-  for(int i=0; i < Count; i++){
+  for(int i=0; i < Count;){
     uint8_t buffer[PKTSIZE];
     struct sockaddr_storage source;
     socklen_t len = sizeof(source);
@@ -209,6 +218,12 @@ void *input_thread(void *p){
       fprintf(stderr,"Recvfrom error %s\n",strerror(errno));
       sleep(1);
       continue;
+    }
+    if(Ssrc != 0){
+      // ssrc specified, ignore others
+      uint32_t ssrc = get_ssrc(buffer+1,length-1);
+      if(ssrc != Ssrc)
+	continue;
     }
     int64_t now = gps_time_ns();
     char temp[1024];
@@ -221,6 +236,7 @@ void *input_thread(void *p){
     }
     dump_metadata(stdout,buffer+1,length-1,Newline);
     fflush(stdout);
+    i++;
   }
   exit(EX_OK);
 }

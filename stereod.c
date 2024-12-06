@@ -160,7 +160,7 @@ int main(int argc,char * const argv[]){
   }
   if(Input) {
     char iface[1024];
-    resolve_mcast(Input,&PCM_dest_address,DEFAULT_RTP_PORT,iface,sizeof(iface));
+    resolve_mcast(Input,&PCM_dest_address,DEFAULT_RTP_PORT,iface,sizeof(iface),0);
     Input_fd = listen_mcast(&PCM_dest_address,iface);
     if(Input_fd == -1){
       fprintf(stderr,"Can't set up PCM input on %s: %sn",Input,strerror(errno));
@@ -168,7 +168,7 @@ int main(int argc,char * const argv[]){
     }
   } else if(Status){
     char iface[1024];
-    resolve_mcast(Status,&Status_dest_address,DEFAULT_STAT_PORT,iface,sizeof(iface));
+    resolve_mcast(Status,&Status_dest_address,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
     Status_fd = listen_mcast(&Status_dest_address,iface);
     if(Status_fd == -1){
       fprintf(stderr,"Can't set up status input on %s: %sn",Status,strerror(errno));      
@@ -192,9 +192,9 @@ int main(int argc,char * const argv[]){
     snprintf(service_name,sizeof(service_name),"%s (%s)",Name,Output);
     char description[1024];
     snprintf(description,sizeof(description),"pcm-source=%s",formatsock(&PCM_dest_address));
-    avahi_start(service_name,"_rtp._udp",DEFAULT_RTP_PORT,Output,ElfHashString(Output),description,NULL,NULL);
-
-    resolve_mcast(Output,&Stereo_dest_address,DEFAULT_RTP_PORT,NULL,0);
+    uint32_t addr = make_maddr(Output);
+    avahi_start(service_name,"_rtp._udp",DEFAULT_RTP_PORT,Output,addr,description,NULL,NULL);
+    resolve_mcast(Output,&Stereo_dest_address,DEFAULT_RTP_PORT,NULL,0,0);
     Output_fd = connect_mcast(&Stereo_dest_address,NULL,Mcast_ttl,IP_tos);
     if(Output_fd == -1){
       fprintf(stderr,"Can't set up output on %s: %s\n",Output,strerror(errno));
@@ -379,30 +379,26 @@ void *decode(void *arg){
   int const audio_L = (L * Audio_samprate) / Composite_samprate;
 
   // Baseband signal 50 Hz - 15 kHz contains mono (L+R) signal
-  struct filter_in * const baseband = create_filter_input(L,M,REAL);
-  if(baseband == NULL)
-    return NULL;
+  struct filter_in baseband;
+  create_filter_input(&baseband,L,M,REAL);
 
   // Baseband filters, decimate from 384 Khz to 48 KHz
-  struct filter_out * const mono = create_filter_output(baseband,NULL,audio_L, REAL);
-  if(mono == NULL)
-    return NULL;
+  struct filter_out mono;
+  create_filter_output(&mono,&baseband,NULL,audio_L, REAL);
   // 50 Hz to 15 kHz
-  set_filter(mono,50.0/Audio_samprate, 15000.0/Audio_samprate, Kaiser_beta);
+  set_filter(&mono,50.0/Audio_samprate, 15000.0/Audio_samprate, Kaiser_beta);
 
   // Narrow filter at 19 kHz for stereo pilot
-  struct filter_out * const pilot = create_filter_output(baseband,NULL,audio_L, COMPLEX);
-  if(pilot == NULL)
-    return NULL;
+  struct filter_out pilot;
+  create_filter_output(&pilot,&baseband,NULL,audio_L, COMPLEX);
   // FCC says +/- 2 Hz, with +/- 20 Hz protected (73.322)
-  set_filter(pilot,-20./Audio_samprate, 20./Audio_samprate, Kaiser_beta);
+  set_filter(&pilot,-20./Audio_samprate, 20./Audio_samprate, Kaiser_beta);
 
   // Stereo difference (L-R) information on DSBSC carrier at 38 kHz
   // Extends +/- 15 kHz around 38 kHz
-  struct filter_out * const stereo = create_filter_output(baseband,NULL,audio_L, COMPLEX);
-  if(stereo == NULL)
-    return NULL;
-  set_filter(stereo,-15000./Audio_samprate, 15000./Audio_samprate, Kaiser_beta);
+  struct filter_out stereo;
+  create_filter_output(&stereo,&baseband,NULL,audio_L, COMPLEX);
+  set_filter(&stereo,-15000./Audio_samprate, 15000./Audio_samprate, Kaiser_beta);
 
   // Assume the remainder is zero, as it is for clean sample rates @ 200 Hz multiples
   // If not, then a mop-up oscillator has to be provided
@@ -455,7 +451,7 @@ void *decode(void *arg){
     
     int16_t const * const samples = (int16_t *)pkt->data;
     
-    int rtp_type = pt_from_info(Audio_samprate,2); // 48 kHz stereo PCM
+    int rtp_type = pt_from_info(Audio_samprate,2,S16BE); // 48 kHz stereo PCM
     if(rtp_type < 0){
       fprintf(stderr,"Can't allocate RTP payload type for samprate = %'d, channels = %d\n",Audio_samprate,2);
       exit(EX_SOFTWARE);
@@ -463,7 +459,7 @@ void *decode(void *arg){
 
     for(int i=0; i<frame_size; i++){
       float const s = SCALE * (int16_t)ntohs(samples[i]);
-      if(put_rfilter(baseband,s) == 0)
+      if(put_rfilter(&baseband,s) == 0)
 	continue;
       // Filter input buffer full
       // Decimate to audio sample rate, do stereo processing
@@ -483,15 +479,15 @@ void *decode(void *arg){
       sp->rtp_state_out.bytes += 2 * sizeof(int16_t) * audio_L;
       sp->rtp_state_out.packets++;
 
-      execute_filter_output(mono,0);    // L+R baseband output at 48 kHz
-      execute_filter_output(pilot,pilot_rotate); // pilot spun down to 0 Hz, 48 kHz rate
-      execute_filter_output(stereo,subc_rotate); // L-R baseband spun down to 0 Hz, 48 kHz rate
+      execute_filter_output(&mono,0);    // L+R baseband output at 48 kHz
+      execute_filter_output(&pilot,pilot_rotate); // pilot spun down to 0 Hz, 48 kHz rate
+      execute_filter_output(&stereo,subc_rotate); // L-R baseband spun down to 0 Hz, 48 kHz rate
 
       /* Should have a stereo pilot detector to squelch difference channel in mono mode
        * But virtually every FM station is stereo anyway, except for KPBS-FM which is long and strong */
       int16_t *wp = (int16_t *)dp;
       for(int n= 0; n < audio_L; n++){
-	complex float subc_phasor = pilot->output.c[n]; // 19 kHz pilot
+	complex float subc_phasor = pilot.output.c[n]; // 19 kHz pilot
 	subc_phasor *= subc_phasor;       // double to 38 kHz
 
 	float const a = approx_magf(subc_phasor);  // and normalize
@@ -500,16 +496,16 @@ void *decode(void *arg){
 	  // zero PCM input would cause a divide-by-zero and a NAN result
 	  // that would poison the de-emphasis integrators if we didn't check for it
 	  subc_phasor /= a;
-	  left_minus_right = __imag__ (conjf(subc_phasor) * stereo->output.c[n]); // Carrier is in quadrature with modulation
+	  left_minus_right = __imag__ (conjf(subc_phasor) * stereo.output.c[n]); // Carrier is in quadrature with modulation
 	}
 	  
-	float left = mono->output.r[n] + left_minus_right; // left channel = L+R + L-R
+	float left = mono.output.r[n] + left_minus_right; // left channel = L+R + L-R
 	assert(!isnan(sp->deemph_state_left));
 	left = sp->deemph_state_left = sp->deemph_state_left * Deemph_rate
 	  + Deemph_gain * (1 - Deemph_rate) * left;
 	*wp++ = htons(scaleclip(left));
 
-	float right =  mono->output.r[n] - left_minus_right; // right channel = L+R - (L-R)
+	float right =  mono.output.r[n] - left_minus_right; // right channel = L+R - (L-R)
 	assert(!isnan(sp->deemph_state_right));
 	right = sp->deemph_state_right = sp->deemph_state_right * Deemph_rate
 	  + Deemph_gain * (1 - Deemph_rate) * right;

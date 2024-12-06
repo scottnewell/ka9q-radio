@@ -12,6 +12,8 @@
 #include <bsd/string.h>
 #endif
 #include <sysexits.h>
+#include <unistd.h>
+#include <strings.h>
 
 #include "conf.h"
 #include "misc.h"
@@ -45,6 +47,7 @@ struct sdrstate {
   int agc_samples; // Samples represented in energy
   float high_threshold;
   float low_threshold;
+  float scale;         // Scale samples for #bits and front end gain
 
   pthread_t cmd_thread;
   pthread_t monitor_thread;
@@ -60,6 +63,7 @@ uint8_t airspy_sensitivity_mixer_gains[GAIN_COUNT] = { 12, 12, 12, 12, 11, 10, 1
 uint8_t airspy_sensitivity_lna_gains[GAIN_COUNT] = {   14, 14, 14, 14, 14, 14, 14, 14, 14, 13, 12, 12,  9,  9,  8,  7, 6, 5, 3, 2, 1, 0 };
 
 
+static float Power_smooth = 0.05; // Calculate this properly someday
 static double set_correct_freq(struct sdrstate *sdr,double freq);
 static int rx_callback(airspy_transfer *transfer);
 static void *airspy_monitor(void *p);
@@ -119,7 +123,7 @@ int airspy_setup(struct frontend * const frontend,dictionary * const Dictionary,
     if(ret != AIRSPY_SUCCESS){
       fprintf(stdout,"airspy_open(%llx) failed: %s\n",(long long)sdr->SN,airspy_error_name(ret));
       return -1;
-    } 
+    }
   }
   {
     airspy_lib_version_t version;
@@ -139,7 +143,7 @@ int airspy_setup(struct frontend * const frontend,dictionary * const Dictionary,
     int ret __attribute__ ((unused));
     ret = airspy_set_packing(sdr->device,1);
     assert(ret == AIRSPY_SUCCESS);
-    
+
     // Set this now, as it affects the list of supported sample rates
     ret = airspy_set_sample_type(sdr->device,AIRSPY_SAMPLE_RAW);
     assert(ret == AIRSPY_SUCCESS);
@@ -179,7 +183,6 @@ int airspy_setup(struct frontend * const frontend,dictionary * const Dictionary,
     ret = airspy_set_samplerate(sdr->device,(uint32_t)frontend->samprate);
     assert(ret == AIRSPY_SUCCESS);
   }
-  frontend->calibrate = 0;
   frontend->max_IF = -600000;
   frontend->min_IF = -0.47 * frontend->samprate;
 
@@ -197,13 +200,13 @@ int airspy_setup(struct frontend * const frontend,dictionary * const Dictionary,
   airspy_set_mixer_agc(sdr->device,mixer_agc);
   if(mixer_agc)
     sdr->software_agc = false;
-  
+
   int const lna_gain = config_getint(Dictionary,section,"lna-gain",-1);
   if(lna_gain != -1){
     frontend->lna_gain = lna_gain;
     airspy_set_lna_gain(sdr->device,lna_gain);
     sdr->software_agc = false;
-  }      
+  }
   int const mixer_gain = config_getint(Dictionary,section,"mixer-gain",-1);
   if(mixer_gain != -1){
     frontend->mixer_gain = mixer_gain;
@@ -231,7 +234,7 @@ int airspy_setup(struct frontend * const frontend,dictionary * const Dictionary,
     int ret __attribute__ ((unused));
     ret = airspy_set_rf_bias(sdr->device,sdr->antenna_bias);
     assert(ret == AIRSPY_SUCCESS);
-  }  
+  }
   {
     char const * const p = config_getstring(Dictionary,section,"description",NULL);
     if(p != NULL){
@@ -310,7 +313,7 @@ static int rx_callback(airspy_transfer *transfer){
   }
   assert(transfer->sample_type == AIRSPY_SAMPLE_RAW);
   int const sampcount = transfer->sample_count;
-  float * wptr = frontend->in->input_write_pointer.r;
+  float * wptr = frontend->in.input_write_pointer.r;
   uint32_t const *up = (uint32_t *)transfer->samples;
   assert(wptr != NULL);
   assert(up != NULL);
@@ -329,8 +332,13 @@ static int rx_callback(airspy_transfer *transfer){
     s[7] =  up[2];
     for(int j=0; j < 8; j++){
       int const x = (s[j] & 0xfff) - 2048; // mask not actually necessary for s[0]
-      frontend->overranges += (x == 2047) || (x <= -2047);
-      wptr[j] = x;
+      if(x == 2047 || x <= -2047){
+	frontend->overranges++;
+	frontend->samp_since_over = 0;
+      } else {
+	frontend->samp_since_over++;
+      }
+      wptr[j] = sdr->scale * x;
       in_energy += x * x;
     }
     wptr += 8;
@@ -338,7 +346,7 @@ static int rx_callback(airspy_transfer *transfer){
   }
   frontend->samples += sampcount;
   frontend->timestamp = gps_time_ns();
-  write_rfilter(frontend->in,NULL,sampcount); // Update write pointer, invoke FFT
+  write_rfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT
   frontend->if_power_instant = (float)in_energy / sampcount;
   frontend->if_power = Power_smooth * (frontend->if_power_instant - frontend->if_power);
   if(sdr->software_agc){
@@ -377,7 +385,7 @@ static double true_freq(uint64_t freq_hz){
 
   // Clock divider set to 2 for the best resolution
   uint32_t const pll_ref = 25000000u / 2; // 12.5 MHz
-  
+
   // Find divider to put VCO = f*2^(d+1) in range VCO_MIN to VCO_MAX
   //          MHz             step, Hz
   // 0: 885.0     1770.0      190.735
@@ -394,12 +402,12 @@ static double true_freq(uint64_t freq_hz){
   }
   if(div_num > MAX_DIV)
     return 0; // Frequency out of range
-  
+
   // r = PLL programming bits: Nint in upper 16 bits, Nfract in lower 16 bits
   // Freq steps are pll_ref / 2^(16 + div_num) Hz
   // Note the '+ (pll_ref >> 1)' term simply rounds the division to the nearest integer
   uint32_t const r = ((freq_hz << (div_num + 16)) + (pll_ref >> 1)) / pll_ref;
-  
+
   // This is a puzzle; is it related to spur suppression?
   double const offset = 0.25;
   // Compute true frequency
@@ -460,10 +468,9 @@ static void set_gain(struct sdrstate * const sdr,int gainstep){
       frontend->lna_gain = airspy_sensitivity_lna_gains[tab];
     }
     frontend->rf_gain = frontend->lna_gain + frontend->mixer_gain + frontend->if_gain;
+    sdr->scale = scale_AD(frontend);
     if(Verbose)
       printf("New gainstep %d: LNA = %d, mixer = %d, vga = %d\n",gainstep,
 	     frontend->lna_gain,frontend->mixer_gain,frontend->if_gain);
   }
 }
-
-

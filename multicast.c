@@ -46,8 +46,8 @@ struct pt_table PT_table[128] = {
 { 0, 0, 0 }, // 7
 { 0, 0, 0 }, // 8
 { 0, 0, 0 }, // 9
-{ 48000, 2, S16BE }, // 10
-{ 48000, 1, S16BE }, // 11
+{ 44100, 2, S16BE }, // 10
+{ 44100, 1, S16BE }, // 11
 { 0, 0, 0 }, // 12
 { 0, 0, 0 }, // 13
 { 0, 0, 0 }, // 14
@@ -136,7 +136,7 @@ struct pt_table PT_table[128] = {
 { 0, 0, 0 }, // 97
 { 0, 0, 0 }, // 98
 { 0, 0, 0 }, // 99
-{ 0, 0, 0 }, // 100 
+{ 0, 0, 0 }, // 100
 { 0, 0, 0 }, // 101
 { 0, 0, 0 }, // 102
 { 0, 0, 0 }, // 103
@@ -148,15 +148,15 @@ struct pt_table PT_table[128] = {
 { 0, 0, 0 }, // 109
 { 0, 0, 0 }, // 110
 { 48000, 2, OPUS }, // 111  Opus always uses a 48K virtual sample rate
-{ 0, 0, 0 }, // 112
-{ 0, 0, 0 }, // 113
+{ 48000, 1, S16BE }, // 112
+{ 48000, 2, S16BE }, // 113
 { 0, 0, 0 }, // 114
 { 0, 0, 0 }, // 115
 { 24000, 1, S16BE }, // 116
-{ 24000, 2, S16BE }, // 117 
+{ 24000, 2, S16BE }, // 117
 { 0, 0, 0 }, // 118
 { 16000, 1, S16BE }, // 119
-{ 16000, 2, S16BE }, // 120 
+{ 16000, 2, S16BE }, // 120
 { 0, 0, 0 }, // 121
 { 12000, 1, S16BE }, // 122
 { 12000, 2, S16BE }, // 123
@@ -165,6 +165,7 @@ struct pt_table PT_table[128] = {
 { 8000, 2, S16BE }, // 126
 { 0, 0, 0 }, // 127
 };
+
 
 #define AX25_PT (96)  // NON-standard payload type for my raw AX.25 frames - clean this up and remove
 #define OPUS_PT (111) // Hard-coded NON-standard payload type for OPUS (should be dynamic with sdp)
@@ -177,6 +178,14 @@ int const AX25_pt = AX25_PT;
 // The mappings are typically extracted from a radiod status channel and kept in a table so they can
 // be changed midstream without losing anything
 int add_pt(int type, int samprate, int channels, enum encoding encoding){
+  if(encoding == NO_ENCODING)
+    return -1;
+
+  if(encoding == OPUS){
+    // Force Opus to fixed values
+    samprate = 48000;
+    channels = 2;
+  }
   if(type >= 0 && type < 128){
     PT_table[type].channels = channels;
     PT_table[type].samprate = samprate;
@@ -202,7 +211,7 @@ char const *Default_mcast_iface;
 // when output = 0, bind to it so we'll accept incoming packets
 // Add parameter 'offset' (normally 0) to port number; this will be 1 when sending RTCP messages
 // (Can we set up a socket for both input and output??)
-int setup_mcast(char const * const target,struct sockaddr *sock,int const output,int const ttl,int const tos,int const offset){
+int setup_mcast(char const * const target,struct sockaddr *sock,int const output,int const ttl,int const tos,int const offset,int tries){
   if(target == NULL && sock == NULL)
     return -1; // At least one must be supplied
 
@@ -212,8 +221,11 @@ int setup_mcast(char const * const target,struct sockaddr *sock,int const output
   }
   char iface[1024];
   iface[0] = '\0';
-  if(target)
-    resolve_mcast(target,sock,DEFAULT_RTP_PORT+offset,iface,sizeof(iface));
+  if(target){
+    int ret = resolve_mcast(target,sock,DEFAULT_RTP_PORT+offset,iface,sizeof(iface),tries);
+    if(ret == -1)
+      return -1;
+  }
   if(strlen(iface) == 0 && Default_mcast_iface != NULL)
     strlcpy(iface,Default_mcast_iface,sizeof(iface));
 
@@ -297,22 +309,11 @@ int listen_mcast(void const *s,char const *iface){
   if(fd == -1){
     perror("setup_mcast socket");
     return -1;
-  }      
-  switch(sock->sa_family){
-  case AF_INET:
-    set_ipv4_options(fd,-1,-1);
-    if(ipv4_join_group(fd,sock,iface) != 0)
-     fprintf(stderr,"join_group failed\n");
-    break;
-  case AF_INET6:
-    set_ipv6_options(fd,-1,-1);
-    if(ipv6_join_group(fd,sock,iface) != 0)
-     fprintf(stderr,"join_group failed\n");
-    break;
-  default:
+  }
+  if(join_group(fd,sock,iface,-1,-1) == -1){
+    close(fd);
     return -1;
   }
-
   if((bind(fd,sock,sizeof(struct sockaddr)) != 0)){
     perror("listen mcast bind");
     close(fd);
@@ -324,7 +325,7 @@ int listen_mcast(void const *s,char const *iface){
 // Resolve a multicast target string in the form "name[:port][,iface]"
 // If "name" is not qualified (no periods) then .local will be appended by default
 // If :port is not specified, port field in result will be zero
-int resolve_mcast(char const *target,void *sock,int default_port,char *iface,int iface_len){
+int resolve_mcast(char const *target,void *sock,int default_port,char *iface,int iface_len,int tries){
   if(target == NULL || strlen(target) == 0 || sock == NULL)
     return -1;
 
@@ -357,26 +358,25 @@ int resolve_mcast(char const *target,void *sock,int default_port,char *iface,int
     snprintf(full_host,sizeof(full_host),"%s.local",host);
   else
     strlcpy(full_host,host,sizeof(full_host));
-    
-  for(try=0;;try++){
+
+  for(try=0;tries == 0 || try != tries;try++){
     results = NULL;
     struct addrinfo hints;
     memset(&hints,0,sizeof(hints));
-#if 0
+#if 1
     // Using hints.ai_family = AF_UNSPEC generates both A and AAAA queries
     // but even when the A query is answered the library times out and retransmits the AAAA
     // query several times. So do only an A (IPv4) query the first time
     hints.ai_family = (try == 0) ? AF_INET : AF_UNSPEC;
 #else
-    // Doesn't seem to be a problem anymore, and using AF_INET often fails
-    // on loopback.
+    // using AF_INET often fails on loopback.
     // Did this get changed recently in getaddrinfo()?
     hints.ai_family = AF_UNSPEC;
 #endif
     hints.ai_socktype = SOCK_DGRAM;
     hints.ai_protocol = IPPROTO_UDP;
     hints.ai_flags = AI_ADDRCONFIG;
-    
+
     int const ecode = getaddrinfo(full_host,port,&hints,&results);
     if(ecode == 0)
       break;
@@ -384,6 +384,8 @@ int resolve_mcast(char const *target,void *sock,int default_port,char *iface,int
       fprintf(stderr,"resolve_mcast getaddrinfo(host=%s, port=%s): %s. Retrying.\n",full_host,port,gai_strerror(ecode));
     sleep(10);
   }
+  if(tries != 0 && try == tries)
+    return -1;
   if(try > 0) // Don't leave them hanging: report success after failure
     fprintf(stderr,"resolve_mcast getaddrinfo(host=%s, port=%s) succeeded\n",full_host,port);
 
@@ -444,13 +446,8 @@ void *hton_rtp(void * const data, struct rtp_header const * const rtp){
 
 
 // Process sequence number and timestamp in incoming RTP header:
-// Check that the sequence number is (close to) what we expect
-// If not, drop it but 3 wild sequence numbers in a row will assume a stream restart
-//
-// Determine timestamp jump, if any
-// Returns: <0            if packet should be dropped as a duplicate or a wild sequence number
-//           0            if packet is in sequence with no missing timestamps
-//         timestamp jump if packet is in sequence or <10 sequence numbers ahead, with missing timestamps
+// count dropped and duplicated packets, but it gets confused 
+// Determine timestamp jump from the next expected one
 int rtp_process(struct rtp_state * const state,struct rtp_header const * const rtp,int const sampcnt){
   if(rtp->ssrc != state->ssrc){
     // Normally this will happen only on the first packet in a session since
@@ -472,18 +469,14 @@ int rtp_process(struct rtp_state * const state,struct rtp_header const * const r
   // Sequence number check
   int const seq_step = (int16_t)(rtp->seq - state->seq);
   if(seq_step != 0){
-    if(seq_step < 0){
+    if(seq_step < 0)
       state->dupes++;
-      return -1;
-    }
-    state->drops += seq_step;
+    else
+      state->drops += seq_step;
   }
   state->seq = rtp->seq + 1;
 
   int const time_step = (int32_t)(rtp->timestamp - state->timestamp);
-  if(time_step < 0)
-    return time_step;    // Old samples; drop. Shouldn't happen if sequence number isn't old
-
   state->timestamp = rtp->timestamp + sampcnt;
   return time_step;
 }
@@ -551,7 +544,7 @@ char const *formatsock(void const *s){
       ic->prev->next = ic->next;
       if(ic->next)
 	ic->next->prev = ic->prev;
-      
+
       ic->next = Inverse_cache_table;
       ic->next->prev = ic;
       ic->prev = NULL;
@@ -564,12 +557,12 @@ char const *formatsock(void const *s){
   assert(ic != NULL); // Malloc failures are rare
   char host[NI_MAXHOST],port[NI_MAXSERV];
   memset(host,0,sizeof(host));
-  memset(port,0,sizeof(port));  
+  memset(port,0,sizeof(port));
   getnameinfo(sa,slen,
 	      host,NI_MAXHOST,
 	      port,NI_MAXSERV,
-	      //		NI_NOFQDN|NI_NUMERICHOST|NI_NUMERICSERV);
-	      NI_NOFQDN|NI_NUMERICSERV);
+	      NI_NOFQDN|NI_NUMERICHOST|NI_NUMERICSERV);
+             //NI_NOFQDN|NI_NUMERICSERV);
   snprintf(ic->hostport,sizeof(ic->hostport),"%s:%s",host,port);
   assert(slen < sizeof(ic->sock));
   memcpy(&ic->sock,sa,slen);
@@ -592,21 +585,35 @@ int channels_from_pt(int const type){
     return 0;
   return PT_table[type].channels;
 }
- 
-int pt_from_info(int const samprate,int const channels){
-  if(samprate <= 0 || channels <= 0 || channels > 2)
+
+enum encoding encoding_from_pt(int const type){
+  if(type < 0 || type > 127)
+    return NO_ENCODING;
+  return PT_table[type].encoding;
+}
+// Dynamically create a new one if not found
+// Should lock the table when it's modified
+// Use for sending only! Receivers need to build a table for each sender
+int pt_from_info(int samprate,int channels,enum encoding encoding){
+  if(samprate <= 0 || channels <= 0 || channels > 2 || encoding == NO_ENCODING || encoding >= UNUSED_ENCODING)
     return -1;
 
-  // Search table for existing entry, otherwise create new entry
-  for(int type=0; type < 128; type++)
-    if(PT_table[type].samprate == samprate && PT_table[type].channels == channels)
-      return type;
+  if(encoding == OPUS){
+    // Force Opus to fixed values
+    channels = 2;
+    samprate = 48000;
+  }
 
+  // Search table for existing entry, otherwise create new entry
   for(int type=0; type < 128; type++){
+    if(PT_table[type].samprate == samprate && PT_table[type].channels == channels && PT_table[type].encoding == encoding)
+      return type;
+  }
+  for(int type=96; type < 128; type++){ // Allocate a new type in the dynamic range
     if(PT_table[type].samprate == 0){
       // allocate it
-      PT_table[type].samprate = samprate;
-      PT_table[type].channels = channels;
+      if(add_pt(type,samprate,channels,encoding) == -1)
+	return -1;
       return type;
     }
   }
@@ -636,7 +643,7 @@ int address_match(void const *arg1,void const *arg2){
       if(memcmp(&sinp1->sin6_addr,&sinp2->sin6_addr,sizeof(sinp1->sin6_addr)) == 0)
 	return 1;
     }
-    break;    
+    break;
   }
   return 0;
 }
@@ -791,7 +798,7 @@ static int ipv4_join_group(int const fd,void const * const sock,char const * con
   struct sockaddr_in const * const sin = (struct sockaddr_in *)sock;
   if(!IN_MULTICAST(ntohl(sin->sin_addr.s_addr)))
     return -1;
-  
+
   struct ip_mreqn mreqn;
   mreqn.imr_multiaddr = sin->sin_addr;
   mreqn.imr_address.s_addr = INADDR_ANY;
@@ -821,10 +828,10 @@ static int ipv6_join_group(int const fd,void const * const sock,char const * con
     ipv6_mreq.ipv6mr_interface = 0; // Default interface
   else
     ipv6_mreq.ipv6mr_interface = if_nametoindex(iface);
-  
+
   // Doesn't seem to be defined on Mac OSX, but is supposed to be synonymous with IPV6_JOIN_GROUP
 #ifndef IPV6_ADD_MEMBERSHIP
-#define IPV6_ADD_MEMBERSHIP IPV6_JOIN_GROUP      
+#define IPV6_ADD_MEMBERSHIP IPV6_JOIN_GROUP
 #endif
   if(setsockopt(fd,IPPROTO_IP,IPV6_ADD_MEMBERSHIP,&ipv6_mreq,sizeof(ipv6_mreq)) != 0 && errno != EADDRINUSE){
     perror("multicast v6 join");
@@ -868,7 +875,7 @@ static struct {
 #ifdef IFF_DORMANT
 	     {IFF_DORMANT,"DORMANT"},
 #endif
-#ifdef IFF_ECHO	     
+#ifdef IFF_ECHO
 	     {IFF_ECHO,"ECHO"},
 #endif
 	     {0, NULL},
@@ -878,10 +885,10 @@ static struct {
 // Dump list of interfaces
 void dump_interfaces(void){
   struct ifaddrs *ifap = NULL;
-  
+
   getifaddrs(&ifap);
   fprintf(stdout,"Interface list:\n");
-  
+
   for(struct ifaddrs const *i = ifap; i != NULL; i = i->ifa_next){
     int const family = i->ifa_addr->sa_family;
 
@@ -915,7 +922,7 @@ void dump_interfaces(void){
     fprintf(stdout,"%s %s(%d)",i->ifa_name,familyname,family);
 
     char host[NI_MAXHOST];
-    
+
     if(i->ifa_addr && getnameinfo(i->ifa_addr,socksize,host,NI_MAXHOST,NULL,0,NI_NUMERICHOST) == 0)
       fprintf(stdout," addr %s",host);
     if(i->ifa_dstaddr && getnameinfo(i->ifa_dstaddr,socksize,host,NI_MAXHOST,NULL,0,NI_NUMERICHOST) == 0)
@@ -934,4 +941,55 @@ void dump_interfaces(void){
   fprintf(stdout,"end of list\n");
   freeifaddrs(ifap);
   ifap = NULL;
+}
+char const *encoding_string(enum encoding e){
+  switch(e){
+  default:
+  case NO_ENCODING:
+    return "none";
+  case S16LE:
+    return "s16le";
+  case S16BE:
+    return "s16be";
+  case OPUS:
+    return "opus";
+  case F32LE:
+    return "f32le";
+  case AX25:
+    return "ax.25";
+  case F16LE:
+    return "f16le";
+  }
+}
+enum encoding parse_encoding(char const *str){
+  if(strcasecmp(str,"s16be") == 0 || strcasecmp(str,"s16") == 0 || strcasecmp(str,"int") == 0)
+    return S16BE;
+  else if(strcasecmp(str,"s16le") == 0)
+    return S16LE;
+  else if(strcasecmp(str,"f32") == 0 || strcasecmp(str,"float") == 0 || strcasecmp(str,"f32le") == 0)
+    return F32LE;
+  else if(strcasecmp(str,"f16") == 0 || strcasecmp(str,"f16le") == 0)
+    return F16LE;
+  else if(strcasecmp(str,"opus") == 0)
+    return OPUS;
+  else if(strcasecmp(str,"ax25") == 0 || strcasecmp(str,"ax.25") == 0)
+    return AX25;
+  else
+    return NO_ENCODING;
+}
+// Generate a multicast address in the 239.0.0.0/8 administratively scoped block
+// avoiding 239.0.0.0/24 and 239.128.0.0/24 since these map at the link layer
+// into the same Ethernet multicast MAC addresses as the 224.0.0.0/8 multicast control block
+// that is not snooped by switches
+uint32_t make_maddr(char const *arg){
+  //  uint32_t addr = (239U << 24) | (ElfHashString(arg) & 0xffffff); // poor performance when last byte is always the same (.)
+  uint32_t addr = (239U << 24) | (fnv1hash((uint8_t *)arg,strlen(arg)) & 0xffffff);
+  // avoid 239.0.0.0/24 and 239.128.0.0/24 since they map to the same
+  // Ethernet multicast MAC addresses as 224.0.0.0/24, the internet control block
+  // This increases the risk of collision slightly (512 out of 16 M)
+  if((addr & 0x007fff00) == 0)
+    addr |= (addr & 0xff) << 8;
+  if((addr & 0x007fff00) == 0)
+    addr |= 0x00100000; // Small chance of this for a random address
+  return addr;
 }

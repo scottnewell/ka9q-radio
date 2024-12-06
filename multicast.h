@@ -11,6 +11,7 @@
 
 #define DEFAULT_MCAST_PORT (5004)
 #define DEFAULT_RTP_PORT (5004)
+#define DEFAULT_RTCP_PORT (5005)
 #define DEFAULT_STAT_PORT (5006)
 
 #define NTP_EPOCH 2208988800UL // Seconds between Jan 1 1900 and Jan 1 1970
@@ -23,11 +24,14 @@ extern int Mcast_ttl;
 extern int IP_tos;
 
 enum encoding {
-  S16LE = 1,
+  NO_ENCODING = 0,
+  S16LE,
   S16BE,
   OPUS,
-  F32,
+  F32LE,
   AX25,
+  F16LE,
+  UNUSED_ENCODING, // Sentinel, not used
 };
 
 struct pt_table {
@@ -129,18 +133,17 @@ void *hton_rtp(void *, struct rtp_header const *);
 
 extern char const *Default_mcast_iface;
 
-int setup_mcast(char const *target,struct sockaddr *,int output,int ttl,int tos,int offset);
-static inline int setup_mcast_in(char const *target,struct sockaddr *sock,int offset){
-  return setup_mcast(target,sock,0,0,0,offset);
+int setup_mcast(char const *target,struct sockaddr *,int output,int ttl,int tos,int offset,int tries);
+static inline int setup_mcast_in(char const *target,struct sockaddr *sock,int offset,int tries){
+  return setup_mcast(target,sock,0,0,0,offset,tries);
 }
 int join_group(int fd,struct sockaddr const * const sock, char const * const iface,int const ttl,int const tos);
 int connect_mcast(void const *sock,char const *iface,int const ttl,int const tos);
 int listen_mcast(void const *sock,char const *iface);
-int resolve_mcast(char const *target,void *sock,int default_port,char *iface,int iface_len);
+int resolve_mcast(char const *target,void *sock,int default_port,char *iface,int iface_len,int tries);
 int setportnumber(void *sock,uint16_t port);
 int getportnumber(void const *sock);
 int address_match(void const *arg1,void const *arg2);
-
 int add_pt(int type, int samprate, int channels, enum encoding encoding);
 
 // Function to process incoming RTP packet headers
@@ -210,6 +213,10 @@ static inline uint8_t *put32(uint8_t *dp,uint32_t x){
 }
 int samprate_from_pt(int type);
 int channels_from_pt(int type);
-int pt_from_info(int samprate,int channels);
+enum encoding encoding_from_pt(int type);
+int pt_from_info(int samprate,int channels,enum encoding);
+char const *encoding_string(enum encoding);
+enum encoding parse_encoding(char const *str);
+uint32_t make_maddr(char const *arg);
 
 #endif

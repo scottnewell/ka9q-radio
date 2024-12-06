@@ -204,7 +204,6 @@ char *ftime(char * result,int size,int64_t t){
   else
     r = snprintf(cp,size,"    ");
     
-  assert(r == 4);
   if(r < 0)
     return NULL;
   cp += r;
@@ -383,6 +382,7 @@ float fm_snr(float r){
 
 // Simple non-crypto hash function
 // Adapted from https://en.wikipedia.org/wiki/PJW_hash_function
+// This needs replacing -- last 4 bits are usually 0xc because the last character of the DNS name is usually a '.'
 uint32_t ElfHash(const uint8_t *s,int length){
     uint32_t h = 0;
     while(length-- > 0){
@@ -398,6 +398,17 @@ uint32_t ElfHash(const uint8_t *s,int length){
 uint32_t ElfHashString(const char *s){
   return ElfHash((uint8_t *)s,strlen(s));
 }
+
+// FNV-1 hash (https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function)
+uint32_t fnv1hash(const uint8_t *s,int length){
+  uint32_t hash = 0x811c9dc5;
+  while(length-- > 0){
+    hash *= 0x01000193;
+    hash ^= *s++;
+  }
+  return hash;
+}
+
 
 
 
@@ -485,7 +496,12 @@ void *mirror_alloc(size_t size){
   int fd;
 
 #if __linux__  
-  fd = memfd_create("mirror_alloc",0);
+  int flags = 0;
+  // New flag? Not documented on man page but mentioned in kernel warning message, so pass it if defined
+#ifdef MFD_NOEXEC_SEAL
+  flags |= MFD_NOEXEC_SEAL; // not executable and sealed to prevent changing to executable.
+#endif
+  fd = memfd_create("mirror_alloc",flags);
   if(fd < 0){
     perror("mirror_alloc memfd_create");
     munmap(base,size * 2);

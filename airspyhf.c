@@ -12,6 +12,8 @@
 #include <bsd/string.h>
 #endif
 #include <sysexits.h>
+#include <unistd.h>
+#include <strings.h>
 
 #include "conf.h"
 #include "misc.h"
@@ -22,9 +24,9 @@
 
 // Global variables set by config file options
 extern int Verbose;
-extern int Overlap;
 extern const char *App_path;
-extern int Verbose;
+
+static float Power_smooth = 0.05; // Calculate this properly someday
 
 // Anything generic should be in 'struct frontend' section 'sdr' in radio.h
 struct sdrstate {
@@ -134,7 +136,7 @@ int airspyhf_setup(struct frontend * const frontend,dictionary * const Dictionar
   }
 
   frontend->isreal = false;
-  frontend->bitspersample = 0; // Already floating point
+  frontend->bitspersample = 1; // Causes gain scaling by unity
   frontend->calibrate = config_getdouble(Dictionary,section,"calibrate",0);
 
   fprintf(stdout,"Set sample rate %'u Hz\n",frontend->samprate);
@@ -209,7 +211,9 @@ static void *airspyhf_monitor(void *p){
       break; // Device seems to have bombed. Exit and let systemd restart us
   }
   fprintf(stdout,"Device is no longer streaming, exiting\n");
-  airspyhf_close(sdr->device);
+  // This can hang when the device locks up
+  // This has been happening at KQ6RS
+  //  airspyhf_close(sdr->device); 
   exit(EX_NOINPUT); // Let systemd restart us
 }
 
@@ -230,22 +234,22 @@ static int rx_callback(airspyhf_transfer_t *transfer){
     fprintf(stdout,"dropped %'lld\n",(long long)transfer->dropped_samples);
   }
   int const sampcount = transfer->sample_count;
-  float complex * const wptr = frontend->in->input_write_pointer.c;
-  float complex * const up = (float complex *)transfer->samples;
+  float complex * const wptr = frontend->in.input_write_pointer.c;
+  float complex const * const up = (float complex *)transfer->samples;
   assert(wptr != NULL);
   assert(up != NULL);
   float in_energy = 0;
   for(int i=0; i < sampcount; i++){
-    float complex x;
-    x = up[i];
-    in_energy += x * x;
-    wptr[i] = x;
+    in_energy += cnrmf(up[i]);
+    wptr[i] = up[i];
   }
   frontend->samples += sampcount;
   frontend->timestamp = gps_time_ns();
-  write_cfilter(frontend->in,NULL,sampcount); // Update write pointer, invoke FFT
-  frontend->if_power_instant = in_energy / sampcount;
-  frontend->if_power += Power_smooth * (frontend->if_power_instant - frontend->if_power);
+  write_cfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT
+  if(isfinite(in_energy)){
+    frontend->if_power_instant = in_energy / sampcount;
+    frontend->if_power += Power_smooth * (frontend->if_power_instant - frontend->if_power);
+  }
   return 0;
 }
 

@@ -86,7 +86,7 @@ int main(int argc,char *argv[]){
   // Set up multicast input
   {
     struct sockaddr_storage sock;
-    resolve_mcast(Mcast_address_text,&sock,DEFAULT_RTP_PORT,NULL,0);
+    resolve_mcast(Mcast_address_text,&sock,DEFAULT_RTP_PORT,NULL,0,0);
     Input_fd = listen_mcast(&sock,NULL);
   }
   if(Input_fd == -1){
@@ -223,7 +223,7 @@ int main(int argc,char *argv[]){
       }
       
       // Construct TNC2-style monitor string for APRS reporting
-      char monstring[2048]; // Should be large enough for any legal AX.25 frame; we'll assert this periodically
+      char monstring[PKTSIZE]; // Should be large enough for any legal AX.25 frame; we'll assert this periodically
       int sspace = sizeof(monstring);
       int infolen = 0;
       int is_tcpip = 0;

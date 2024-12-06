@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #endif
 #include <sysexits.h>
+#include <strings.h>
 
 #include "conf.h"
 #include "fcd.h"
@@ -50,6 +51,7 @@ static int Blocksize;
 extern bool Stop_transfers;
 
 static int const Random_samples = 30000000;
+static float Power_smooth = 0.05; // Calculate this properly someday
 
 // One second of noise in requested format
 // Will be played with a random starting point every block
@@ -214,7 +216,7 @@ static void *proc_sig_gen(void *arg){
     float if_energy = 0;
     if(frontend->isreal){
       // Real signal
-      float * wptr = frontend->in->input_write_pointer.r;
+      float * wptr = frontend->in.input_write_pointer.r;
       for(int i=0; i < blocksize; i++){
 	wptr[i] = sdr->amplitude * creal(step_osc(&carrier));
 	switch(sdr->modulation){
@@ -246,10 +248,10 @@ static void *proc_sig_gen(void *arg){
 	wptr [i] *= scale;
 	if_energy += wptr[i] * wptr[i];
       }
-      write_rfilter(frontend->in,NULL,blocksize); // Update write pointer, invoke FFT      
+      write_rfilter(&frontend->in,NULL,blocksize); // Update write pointer, invoke FFT      
     } else {
       // Complex signal
-      complex float * wptr = frontend->in->input_write_pointer.c;
+      complex float * wptr = frontend->in.input_write_pointer.c;
       for(int i=0; i < blocksize; i++){
 	wptr[i] = sdr->amplitude * step_osc(&carrier);
 	switch(sdr->modulation){
@@ -282,7 +284,7 @@ static void *proc_sig_gen(void *arg){
 	wptr [i] *= scale;
 	if_energy += cnrmf(wptr[i]);
       }
-      write_cfilter(frontend->in,NULL,blocksize); // Update write pointer, invoke FFT      
+      write_cfilter(&frontend->in,NULL,blocksize); // Update write pointer, invoke FFT      
     }
     // The variability in blocksize due to scheduling variability causes the energy integrated into frontend->if_energy
     // to vary, causing the reported input level to bobble around the nominal value. Long refresh intervals with 'control'

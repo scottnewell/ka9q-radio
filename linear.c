@@ -9,7 +9,7 @@
 #define DEFAULT_GAIN (0.)           // Linear gain, dB
 #define DEFAULT_THRESHOLD (-15.0)     // AGC threshold, dB (noise will be at HEADROOM + THRESHOLD)
 #define DEFAULT_PLL_DAMPING (M_SQRT1_2); // PLL loop damping factor; 1/sqrt(2) is "critical" damping
-#define DEFAULT_PLL_LOCKTIME (.05);  // time, sec PLL stays above/below threshold SNR to lock/unlock
+#define DEFAULT_PLL_LOCKTIME (.5);  // time, sec PLL stays above/below threshold SNR to lock/unlock
 
 #define _GNU_SOURCE 1
 #include <assert.h>
@@ -33,15 +33,22 @@ void *demod_linear(void *arg){
     snprintf(name,sizeof(name),"lin %u",chan->output.rtp.ssrc);
     pthread_setname(name);
   }
- 
+  pthread_mutex_init(&chan->status.lock,NULL);
+  pthread_mutex_lock(&chan->status.lock);
+  FREE(chan->status.command);
+  FREE(chan->filter.energies);
+  FREE(chan->spectrum.bin_data);
+  if(chan->output.opus != NULL){
+    opus_encoder_destroy(chan->output.opus);
+    chan->output.opus = NULL;
+  }
+
   int const blocksize = chan->output.samprate * Blocktime / 1000;
   delete_filter_output(&chan->filter.out);
-  chan->filter.out = create_filter_output(Frontend.in,NULL,blocksize,COMPLEX);
-  if(chan->filter.out == NULL){
-    fprintf(stdout,"unable to create filter for ssrc %lu\n",(unsigned long)chan->output.rtp.ssrc);
-    goto quit;
-  }
-  set_filter(chan->filter.out,
+  create_filter_output(&chan->filter.out,&Frontend.in,NULL,blocksize,COMPLEX);
+  pthread_mutex_unlock(&chan->status.lock);
+
+  set_filter(&chan->filter.out,
 	     chan->filter.min_IF/chan->output.samprate,
 	     chan->filter.max_IF/chan->output.samprate,
 	     chan->filter.kaiser_beta);
@@ -53,30 +60,22 @@ void *demod_linear(void *arg){
   int const lock_limit = lock_time * chan->output.samprate;
   init_pll(&chan->pll.pll,(float)chan->output.samprate);
 
-  pthread_mutex_lock(&chan->lock);
   realtime();
 
-  while(!chan->terminate){
-    if(downconvert(chan) == -1) // received terminate
-      break;
-
-    int const N = chan->filter.out->olen; // Number of raw samples in filter output buffer
+  while(downconvert(chan) == 0){
+    int const N = chan->filter.out.olen; // Number of raw samples in filter output buffer
 
     // First pass over sample block.
     // Run the PLL (if enabled)
     // Apply post-downconversion shift (if enabled, e.g. for CW)
     // Measure energy
     // Apply PLL & frequency shift, measure energy
-    complex float * const buffer = chan->filter.out->output.c; // Working buffer
+    complex float * const buffer = chan->filter.out.output.c; // Working buffer
     float signal = 0; // PLL only
     float noise = 0;  // PLL only
 
     if(chan->linear.pll){
       // Update PLL state, if active
-      if(!chan->pll.was_on){
-	chan->pll.pll.integrator = 0; // reset oscillator when coming back on
-	chan->pll.was_on = true;
-      }
       set_pll_params(&chan->pll.pll,chan->linear.loop_bw,damping);
       for(int n=0; n<N; n++){
 	complex float const s = buffer[n] *= conjf(pll_phasor(&chan->pll.pll));
@@ -98,40 +97,39 @@ void *demod_linear(void *arg){
 	chan->sig.snr = NAN;
 
       // Loop lock detector with hysteresis
-      // If the loop is locked, the SNR must fall below the threshold for a while
-      // before we declare it unlocked, and vice versa
-#if 0
-      if(chan->sig.snr < chan->squelch_close){
-	chan->pll.lock_count -= N;
-      } else if(chan->sig.snr > chan->squelch_open){
-	chan->pll.lock_count += N;
-      }
-#else
-      // Relax the required SNR for lock. If there's more I signal than Q signal, declare it locked
+      // If there's more I signal than Q signal, declare it locked
       // The squelch settings are really for FM, not for us
-      if(chan->sig.snr < 0){
+      if(chan->sig.snr < chan->fm.squelch_close){
 	chan->pll.lock_count -= N;
-      } else if(chan->sig.snr > 0){
+	if(chan->pll.lock_count <= -lock_limit){
+	  chan->pll.lock_count = -lock_limit;
+	  chan->linear.pll_lock = false;
+	}
+      } else if(chan->sig.snr > chan->fm.squelch_open){
 	chan->pll.lock_count += N;
+	if(chan->pll.lock_count >= lock_limit){
+	  chan->pll.lock_count = lock_limit;
+	  chan->linear.pll_lock = true;
+	}
       }
-#endif
-      if(chan->pll.lock_count >= lock_limit){
-	chan->pll.lock_count = lock_limit;
-	chan->linear.pll_lock = true;
+      double phase = carg(pll_phasor(&chan->pll.pll));
+      if(chan->sig.snr > chan->fm.squelch_close){
+	// Try to avoid counting cycle slips during loss of lock
+	double phase_diff = phase - chan->linear.cphase;
+	if(phase_diff > M_PI)
+	  chan->linear.rotations--;
+	else if(phase_diff < -M_PI)
+	  chan->linear.rotations++;
       }
-      if(chan->pll.lock_count <= -lock_limit){
-	chan->pll.lock_count = -lock_limit;
-	chan->linear.pll_lock = false;
-      }
-      chan->linear.lock_timer = chan->pll.lock_count;
-      chan->linear.cphase = carg(pll_phasor(&chan->pll.pll));
-      if(chan->linear.square)
-	chan->linear.cphase /= 2; // Squaring doubles the phase
-      
+      chan->linear.cphase = phase;
       chan->sig.foffset = pll_freq(&chan->pll.pll);
-    } else { // if PLL
-      chan->pll.was_on = false;
+    } else {
+      chan->linear.rotations = 0;
+      chan->pll.pll.integrator = 0; // reset oscillator when coming back on
+      chan->pll.lock_count = -lock_limit;
+      chan->linear.pll_lock = false;
     }
+
     // Apply frequency shift
     // Must be done after PLL, which operates only on DC
     set_osc(&chan->shift,chan->tune.shift/chan->output.samprate,0);
@@ -194,7 +192,7 @@ void *demod_linear(void *arg){
       if(chan->linear.env){
 	// AM envelope detection
 	for(int n=0; n < N; n++){
-	  samples[n] = cabsf(buffer[n]) * chan->output.gain;
+	  samples[n] = M_SQRT1_2 * cabsf(buffer[n]) * chan->output.gain; // Power from both I&Q
 	  output_power += samples[n] * samples[n];
 	  chan->output.gain *= gain_change;
 	}
@@ -213,7 +211,7 @@ void *demod_linear(void *arg){
       if(chan->linear.env){
 	// I on left, envelope/AM on right (for experiments in fine SSB tuning)
 	for(int n=0; n < N; n++){      
-	  __imag__ buffer[n] = cabsf(buffer[n]) * 2; // empirical +6dB for AM to match SSB
+	  __imag__ buffer[n] = M_SQRT1_2 * cabsf(buffer[n]);
 	  buffer[n] *= chan->output.gain;
 	  output_power += cnrmf(buffer[n]);
 	  chan->output.gain *= gain_change;
@@ -232,11 +230,9 @@ void *demod_linear(void *arg){
       output_power *= 2; // +3 dB for mono since 0 dBFS = 1 unit peak, not RMS
     chan->output.energy += output_power;
     // Mute if no signal (e.g., outside front end coverage)
-    bool mute = false;
-    if(output_power == 0)
-      mute = true;
-    if(chan->linear.pll && !chan->linear.pll_lock) // Use PLL for AM carrier squelch
-      mute = true;
+    // or if no PLL lock (AM squelch)
+    // or if zero frequency
+    bool mute = (output_power == 0) || (chan->linear.pll && !chan->linear.pll_lock) || (chan->tune.freq == 0);
 
     // send_output() knows if the buffer is mono or stereo
     if(send_output(chan,(float *)buffer,N,mute) == -1)
@@ -245,14 +241,6 @@ void *demod_linear(void *arg){
     // When the gain is allowed to vary, the average gain won't be exactly consistent with the
     // average baseband (input) and output powers. But I still try to make it meaningful.
     chan->output.sum_gain_sq += start_gain * chan->output.gain; // accumulate square of approx average gain
-
-    // Periodically send status to data channel if configured and we're not muted
-    if(!mute)
-      data_channel_status(chan);
   }
- quit:;
-  pthread_mutex_unlock(&chan->lock);
-  FREE(chan->filter.energies);
-  delete_filter_output(&chan->filter.out);
   return NULL;
 }

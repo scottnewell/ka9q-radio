@@ -44,7 +44,7 @@ int send_cw(int sock, struct rtp_state *rtp_state, wint_t c){
 
   struct rtp_header rtp;
   memset(&rtp,0,sizeof(rtp));
-  int const type = pt_from_info(Samprate,1);
+  int const type = pt_from_info(Samprate,1,S16BE);
   if(type < 0)
     return 0; // Can't allocate!
   rtp.type = type;
@@ -154,7 +154,7 @@ int main(int argc,char *argv[]){
   setlocale(LC_ALL,""); // Accept all characters, not just the English subset of Latin
   Dit_length = init_morse(CW_speed,CW_pitch,CW_level,Samprate);
   struct sockaddr sock;
-  int const fd = setup_mcast(Target,&sock,1,1,0,0);
+  int const fd = setup_mcast(Target,&sock,1,1,0,0,0);
   if(fd == -1){
     fprintf(stdout,"Can't resolve %s\n",Target);
     exit(EX_IOERR);

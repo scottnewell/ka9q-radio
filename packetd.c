@@ -140,7 +140,7 @@ int main(int argc,char *argv[]){
 	break;
       }
       Input[Nfds] = optarg;
-      Input_fd[Nfds] = setup_mcast_in(optarg,NULL,0);
+      Input_fd[Nfds] = setup_mcast_in(optarg,NULL,0,0);
       if(Input_fd[Nfds] == -1){
 	fprintf(stdout,"Can't set up input %s\n",optarg);
 	break;
@@ -164,13 +164,13 @@ int main(int argc,char *argv[]){
 	close(Status_fd);
 	Status_fd = -1;
       }
-      Status_fd = setup_mcast_in(optarg,(struct sockaddr *)&Status_dest_address,2);
+      Status_fd = setup_mcast_in(optarg,(struct sockaddr *)&Status_dest_address,2,0);
       if(Status_fd == -1){
 	fprintf(stdout,"Can't set up status input on %s: %s\n",optarg,strerror(errno));
 	exit(EX_USAGE);
       }
 #if 0 // Later use?
-      Status_out_fd = setup_mcast(NULL,(struct sockaddr *)&Status_dest_address,1,Mcast_ttl,IP_tos,2);
+      Status_out_fd = setup_mcast(NULL,(struct sockaddr *)&Status_dest_address,1,Mcast_ttl,IP_tos,2,0);
       {
 	socklen_t len;
 	len = sizeof(Local_status_source_address);
@@ -207,7 +207,7 @@ int main(int argc,char *argv[]){
       break;
     }
     Input[Nfds] = argv[i];
-    Input_fd[Nfds] = setup_mcast_in(Input[Nfds],NULL,0);
+    Input_fd[Nfds] = setup_mcast_in(Input[Nfds],NULL,0,0);
     if(Input_fd[Nfds] == -1){
       fprintf(stdout,"Can't set up input %s\n",Input[Nfds]);
       continue;
@@ -232,9 +232,10 @@ int main(int argc,char *argv[]){
 	break; // Too long!
       p += snprintf(&description[p],sizeof(description)-p,"%s%s",i > 0 ? "," : "" ,Input[i]);
     }
-    avahi_start(Name,"_ax25._udp",DEFAULT_RTP_PORT,Output,ElfHashString(Output),description,NULL,NULL);
+    uint32_t addr = make_maddr(Output);
+    avahi_start(Name,"_ax25._udp",DEFAULT_RTP_PORT,Output,addr,description,NULL,NULL);
   }
-  Output_fd = setup_mcast(Output,NULL,1,Mcast_ttl,IP_tos,0);
+  Output_fd = setup_mcast(Output,NULL,1,Mcast_ttl,IP_tos,0,0);
   if(Output_fd == -1){
     fprintf(stdout,"Must specify --ax25-out\n");
     exit(EX_USAGE);
@@ -300,7 +301,7 @@ int main(int argc,char *argv[]){
 	      fprintf(stdout,"joining pcm input channel %s\n",formatsock(&PCM_dest_address));
 	    }
 
-	    Input_fd[Nfds] = setup_mcast_in(NULL,(struct sockaddr *)&PCM_dest_address,0);
+	    Input_fd[Nfds] = setup_mcast_in(NULL,(struct sockaddr *)&PCM_dest_address,0,0);
 	    if(Input_fd[Nfds] != -1){
 	      Max_fd = max(Max_fd,Input_fd[Nfds]);
 	      FD_SET(Input_fd[Nfds],&Fdset_template);
@@ -487,11 +488,13 @@ static void *decode_task(void *arg){
   struct session *sp = (struct session *)arg;
   assert(sp != NULL);
 
-  struct filter_in *filter_in = create_filter_input(AL,AM,REAL);
-  struct filter_out *filter_out = create_filter_output(filter_in,NULL,AL,COMPLEX);
+  struct filter_in filter_in;
+  create_filter_input(&filter_in,AL,AM,REAL);
+  struct filter_out filter_out;
+  create_filter_output(&filter_out,&filter_in,NULL,AL,COMPLEX);
   const float filter_low = min(mark_tone,space_tone) - Bitrate/4;
   const float filter_high = max(mark_tone,space_tone) + Bitrate/4;
-  set_filter(filter_out,filter_low/sp->samprate,filter_high/sp->samprate,3.0); // Creates analytic, band-limited signal
+  set_filter(&filter_out,filter_low/sp->samprate,filter_high/sp->samprate,3.0); // Creates analytic, band-limited signal
 
   // Tone replica generators (-1200 and -2200 Hz)
   struct osc mark;
@@ -541,21 +544,21 @@ static void *decode_task(void *arg){
 	pad = 5; // flush filters with 5 blocks of padding
     }
 
-    assert(filter_in->ilen == AL);
-    assert(filter_out->olen == AL);
+    assert(filter_in.ilen == AL);
+    assert(filter_out.olen == AL);
     for(int n=0; n < AL; n++){
-      if(put_rfilter(filter_in,ntohs(samples[n]) * SCALE) == 0)
+      if(put_rfilter(&filter_in,ntohs(samples[n]) * SCALE) == 0)
 	continue;
-      execute_filter_output(filter_out,0);    // Shouldn't block
-      for(int n=0; n<filter_out->olen; n++){
+      execute_filter_output(&filter_out,0);    // Shouldn't block
+      for(int n=0; n<filter_out.olen; n++){
 	// Spin down by mark and space frequencies, accumulate each in boxcar (comb) filters
 	// Mark and space each have in-phase and offset integrators for timing recovery
 	float complex s;
-	s = filter_out->output.c[n] * step_osc(&mark);
+	s = filter_out.output.c[n] * step_osc(&mark);
 	mark_accum += s;
 	mark_offset_accum += s;
 	
-	s = filter_out->output.c[n] * step_osc(&space);
+	s = filter_out.output.c[n] * step_osc(&space);
 	space_accum += s;
 	space_offset_accum += s;
 	

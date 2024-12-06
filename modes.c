@@ -42,8 +42,8 @@ static float const DEFAULT_THRESHOLD = -15.0;    // Don't let noise rise above -
 static float const DEFAULT_GAIN = 50.0;         // Unused in FM, usually adjusted automatically in linear
 static float const DEFAULT_HANGTIME = 1.1;       // keep low gain 1.1 sec before increasing
 static float const DEFAULT_PLL_BW = 10.0;       // Reasonable for AM
-static int   const DEFAULT_SQUELCHTAIL = 1;     // close on frame *after* going below threshold, may let partial frame noise through
-static int   const DEFAULT_UPDATE = 50;         // 1 Hz for a 20 ms frame time
+static int   const DEFAULT_SQUELCH_TAIL = 1;     // close on frame *after* going below threshold, may let partial frame noise through
+static int   const DEFAULT_UPDATE = 25;         // 2 Hz for a 20 ms frame time
 #if 0
 static int   const DEFAULT_FM_SAMPRATE = 24000;
 static float const DEFAULT_NBFM_TC = 530.5;      // Time constant for NBFM emphasis (300 Hz corner)
@@ -51,6 +51,8 @@ static float const DEFAULT_WFM_TC = 75.0;        // Time constant for FM broadca
 static float const DEFAULT_FM_DEEMPH_GAIN = 12.0; // +12 dB to give subjectively equal loudness with deemphsis
 static float const DEFAULT_WFM_DEEMPH_GAIN = 0.0;
 #endif
+static int   const DEFAULT_BITRATE = 32000;       // Default Opus compressed bit rate
+extern int Overlap;
 
 
 int demod_type_from_name(char const *name){
@@ -72,13 +74,13 @@ char const *demod_name_from_type(enum demod_type type){
 int set_defaults(struct channel *chan){
   if(chan == NULL)
     return -1;
-  
+
   chan->tp1 = chan->tp2 = NAN;
   chan->tune.doppler = 0;
   chan->tune.doppler_rate = 0;
   // De-emphasis defaults to off, enabled only in FM modes
-  chan->deemph.rate = 0;
-  chan->deemph.gain = 1.0;
+  chan->fm.rate = 0;
+  chan->fm.gain = 1.0;
 
   chan->demod_type = DEFAULT_DEMOD;
   chan->filter.kaiser_beta = DEFAULT_KAISER_BETA;
@@ -86,9 +88,9 @@ int set_defaults(struct channel *chan){
   chan->filter.max_IF = DEFAULT_HIGH;
   chan->filter.remainder = NAN;      // Important to force downconvert() to call set_osc() on first call
   chan->filter.bin_shift = -1000999; // Force initialization here too
-  chan->squelch_open = dB2power(DEFAULT_SQUELCH_OPEN);
-  chan->squelch_close = dB2power(DEFAULT_SQUELCH_CLOSE);
-  chan->squelchtail = DEFAULT_SQUELCHTAIL;
+  chan->fm.squelch_open = dB2power(DEFAULT_SQUELCH_OPEN);
+  chan->fm.squelch_close = dB2power(DEFAULT_SQUELCH_CLOSE);
+  chan->fm.squelch_tail = DEFAULT_SQUELCH_TAIL;
   chan->output.headroom = dB2voltage(DEFAULT_HEADROOM);
   chan->output.channels = 1;
   chan->tune.shift = 0.0;
@@ -103,14 +105,17 @@ int set_defaults(struct channel *chan){
   chan->filter.isb = false;
   chan->linear.loop_bw = DEFAULT_PLL_BW;
   chan->linear.agc = true;
-  chan->output.samprate = DEFAULT_LINEAR_SAMPRATE;
+  chan->output.samprate = round_samprate(DEFAULT_LINEAR_SAMPRATE); // Don't trust even a compile constant
+  chan->output.encoding = S16BE;
+  chan->output.opus_bitrate = DEFAULT_BITRATE;
   double r = remainder(Blocktime * chan->output.samprate * .001,1.0);
   if(r != 0){
     fprintf(stdout,"Warning: non-integral samples in %.3f ms block at sample rate %d Hz: remainder %g\n",
 	    Blocktime,chan->output.samprate,r);
   }
   chan->output.pacing = false;
-  chan->status_rate = DEFAULT_UPDATE;
+  chan->status.output_interval = DEFAULT_UPDATE;
+  chan->output.silent = true; // Prevent burst of FM status messages on output channel at startup
   return 0;
 }
 
@@ -128,11 +133,14 @@ int loadpreset(struct channel *chan,dictionary const *table,char const *sname){
   }
   {
     char const *p = config_getstring(table,sname,"samprate",NULL);
-    if(p != NULL)
-      chan->output.samprate = parse_frequency(p,false);
+    if(p != NULL){
+      int s = parse_frequency(p,false);
+      chan->output.samprate = round_samprate(s);
+    }
   }
+  // This test can't fail since round_samprate() forces it to a minimium of the blockrate; not sure what is ideal here
   if(chan->output.samprate == 0)
-      chan->output.samprate = DEFAULT_LINEAR_SAMPRATE; // Make sure it gets set to *something*, even if wrong (e.g. for FM)
+    chan->output.samprate = round_samprate(DEFAULT_LINEAR_SAMPRATE); // Make sure it gets set to *something*, even if wrong (e.g. for FM)
   chan->output.channels = config_getint(table,sname,"channels",chan->output.channels);
   if(config_getboolean(table,sname,"mono",false))
     chan->output.channels = 1;
@@ -159,14 +167,15 @@ int loadpreset(struct channel *chan,dictionary const *table,char const *sname){
   {
     char const *cp = config_getstring(table,sname,"squelch-open",NULL);
     if(cp)
-      chan->squelch_open = dB2power(strtof(cp,NULL));
+      chan->fm.squelch_open = dB2power(strtof(cp,NULL));
   }
   {
     char const *cp = config_getstring(table,sname,"squelch-close",NULL);
     if(cp)
-      chan->squelch_close = dB2power(strtof(cp,NULL));
+      chan->fm.squelch_close = dB2power(strtof(cp,NULL));
   }
-  chan->squelchtail = config_getint(table,sname,"squelchtail",chan->squelchtail);
+  chan->fm.squelch_tail = config_getint(table,sname,"squelchtail",chan->fm.squelch_tail); // historical
+  chan->fm.squelch_tail = config_getint(table,sname,"squelch-tail",chan->fm.squelch_tail);
   {
     char const *cp = config_getstring(table,sname,"headroom",NULL);
     if(cp)
@@ -212,33 +221,58 @@ int loadpreset(struct channel *chan,dictionary const *table,char const *sname){
   chan->linear.square = config_getboolean(table,sname,"square",chan->linear.square);  // On implies PLL on
   if(chan->linear.square)
     chan->linear.pll = true; // Square implies PLL
-  
+
   chan->filter.isb = config_getboolean(table,sname,"conj",chan->filter.isb);       // (unimplemented anyway)
   chan->linear.loop_bw = config_getfloat(table,sname,"pll-bw",chan->linear.loop_bw);
   chan->linear.agc = config_getboolean(table,sname,"agc",chan->linear.agc);
   chan->fm.threshold = config_getboolean(table,sname,"extend",chan->fm.threshold); // FM threshold extension
   chan->fm.threshold = config_getboolean(table,sname,"threshold-extend",chan->fm.threshold); // FM threshold extension
-
   {
     char const *cp = config_getstring(table,sname,"deemph-tc",NULL);
     if(cp){
       float const tc = strtof(cp,NULL) * 1e-6;
-      chan->deemph.rate = expf(-1.0f / (tc * chan->output.samprate));
+      chan->fm.rate = -expm1f(-1.0f / (tc * chan->output.samprate));
     }
   }
   {
     char const *cp = config_getstring(table,sname,"deemph-gain",NULL);
     if(cp){
       float const g = strtof(cp,NULL);
-      chan->deemph.gain = dB2voltage(g);
+      chan->fm.gain = dB2voltage(g);
     }
   }
-  // "pl" and "ctcss" are synonyms
+  // "tone", "pl" and "ctcss" are synonyms
+  chan->fm.tone_freq = config_getfloat(table,sname,"tone",chan->fm.tone_freq);
   chan->fm.tone_freq = config_getfloat(table,sname,"pl",chan->fm.tone_freq);
   chan->fm.tone_freq = config_getfloat(table,sname,"ctcss",chan->fm.tone_freq);
-
+  chan->fm.tone_freq = fabsf(chan->fm.tone_freq);
+  if(chan->fm.tone_freq > 3000){
+    fprintf(stdout,"Tone %.1f out of range\n",chan->fm.tone_freq);
+    chan->fm.tone_freq = 0;
+  }
   chan->output.pacing = config_getboolean(table,sname,"pacing",chan->output.pacing);
-
+  {
+    char const *cp = config_getstring(table,sname,"encoding",NULL);
+    if(cp)
+      chan->output.encoding = parse_encoding(cp);
+  }
+  chan->output.opus_bitrate = config_getint(table,sname,"bitrate",chan->output.opus_bitrate);
   return 0;
 }
 
+// force an output sample rate to a multiple of the FFT block rate times the number of
+// new blocks in each FFT interval.
+// For the default block time of 20 ms and overlap of 1/5, this is (1/20 ms)*(5-1) = 50 Hz*4 = 200 Hz
+// Should we limit the sample rate? In principle it could be greater than the input sample rate,
+// and the filter should just interpolate. But there should be practical limits
+
+// Should sample rates be integers when the block rate could in principle not be?
+// Usually Blocktime = 20.0000 ms (50.00000 Hz), which avoids the problem
+int round_samprate(int x){
+  float const baserate = (1000. / Blocktime) * (Overlap - 1);
+
+  if(x < baserate)
+    return roundf(baserate); // Output one iFFT bin minimum, i.e., blockrate
+
+  return baserate * roundf(x / baserate); // Nearest multiple of block rate * (Overlap - 1)
+}

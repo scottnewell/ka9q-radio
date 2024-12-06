@@ -143,7 +143,7 @@ int main(int argc,char * const argv[]){
 
   if(Input){
     char iface[1024];
-    resolve_mcast(Input,&PCM_dest_address,DEFAULT_RTP_PORT,iface,sizeof(iface));
+    resolve_mcast(Input,&PCM_dest_address,DEFAULT_RTP_PORT,iface,sizeof(iface),0);
     Input_fd = listen_mcast(&PCM_dest_address,iface);
     if(Input_fd == -1)
       fprintf(stderr,"Can't set up input on %s: %sn",optarg,strerror(errno));
@@ -151,7 +151,7 @@ int main(int argc,char * const argv[]){
   }
   if(Status){
     char iface[1024];
-    resolve_mcast(Status,&Status_dest_address,DEFAULT_STAT_PORT,iface,sizeof(iface));
+    resolve_mcast(Status,&Status_dest_address,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
     Status_fd = listen_mcast(&Status_dest_address,iface);
     if(Status_fd == -1){
       fprintf(stderr,"Can't set up input on %s: %s\n",optarg,strerror(errno));
@@ -173,9 +173,10 @@ int main(int argc,char * const argv[]){
     snprintf(service_name,sizeof(service_name),"%s (%s)",Name,output);
     char description[1024];
     snprintf(description,sizeof(description),"pcm-source=%s",Input);
-    avahi_start(service_name,"_rtp._udp",DEFAULT_RTP_PORT,output,ElfHashString(output),description,NULL,NULL);
+    uint32_t addr = make_maddr(output);
+    avahi_start(service_name,"_rtp._udp",DEFAULT_RTP_PORT,output,addr,description,NULL,NULL);
 
-    resolve_mcast(output,&Stereo_dest_address,DEFAULT_RTP_PORT,NULL,0);
+    resolve_mcast(output,&Stereo_dest_address,DEFAULT_RTP_PORT,NULL,0,0);
     Output_fd = connect_mcast(&Stereo_dest_address,NULL,Mcast_ttl,IP_tos);
     if(Output_fd == -1)
       fprintf(stderr,"Can't set up output on %s: %s\n",output,strerror(errno));
@@ -393,23 +394,19 @@ void *decode(void *arg){
   int const audio_L = (L * Out_samprate) / In_samprate;
 
   // Baseband signal 50 Hz - 15 kHz contains mono (L+R) signal
-  struct filter_in * const baseband = create_filter_input(L,M,REAL);
-  if(baseband == NULL)
-    return NULL;
-
+  struct filter_in baseband;
+  create_filter_input(&baseband,L,M,REAL);
   // Baseband filters, decimate from 384 Khz to 48 KHz
 
   // Narrow filter at 19 kHz for stereo pilot
-  struct filter_out * const pilot = create_filter_output(baseband,NULL,audio_L, COMPLEX);
-  if(pilot == NULL)
-    return NULL;
-  set_filter(pilot,-100./Out_samprate, 100./Out_samprate, Kaiser_beta);
+  struct filter_out pilot;
+  create_filter_output(&pilot,&baseband,NULL,audio_L, COMPLEX);
+  set_filter(&pilot,-100./Out_samprate, 100./Out_samprate, Kaiser_beta);
 
   // RDS info at 57 kHz = 19 kHz * 3
-  struct filter_out * const rds = create_filter_output(baseband,NULL,audio_L, COMPLEX);
-  if(rds == NULL)
-    return NULL;
-  set_filter(rds,-2000./Out_samprate, 2000./Out_samprate, Kaiser_beta);
+  struct filter_out rds;
+  create_filter_output(&rds,&baseband,NULL,audio_L, COMPLEX);
+  set_filter(&rds,-2000./Out_samprate, 2000./Out_samprate, Kaiser_beta);
 
   // Assume the remainder is zero, as it is for clean sample rates @ 200 Hz multiples
   // If not, then a mop-up oscillator has to be provided
@@ -418,7 +415,7 @@ void *decode(void *arg){
   int const pilot_rotate = quantum * round(19000./(hzperbin * quantum));
   int const subc_rotate = quantum * round(57000./(hzperbin * quantum));
 
-  int const payload_type = pt_from_info(Out_samprate,2);
+  int const payload_type = pt_from_info(Out_samprate,2,S16BE);
   if(payload_type < 0){
     fprintf(stderr,"Can't allocate RTP payload type for samprate = %'d, channels = %d\n",Out_samprate,2);
     exit(EX_SOFTWARE);
@@ -470,7 +467,7 @@ void *decode(void *arg){
     
     for(int i=0; i<frame_size; i++){
       float const s = SCALE * (int16_t)ntohs(samples[i]);
-      if(put_rfilter(baseband,s) == 0)
+      if(put_rfilter(&baseband,s) == 0)
 	continue;
       // Filter input buffer full
       // Decimate to audio sample rate, do stereo processing
@@ -491,8 +488,8 @@ void *decode(void *arg){
       sp->rtp_state_out.bytes += 2 * sizeof(int16_t) * audio_L;
       sp->rtp_state_out.packets++;
 
-      execute_filter_output(pilot,pilot_rotate); // pilot spun down to 0 Hz, 48 kHz rate
-      execute_filter_output(rds,subc_rotate); // L-R baseband spun down to 0 Hz, 48 kHz rate
+      execute_filter_output(&pilot,pilot_rotate); // pilot spun down to 0 Hz, 48 kHz rate
+      execute_filter_output(&rds,subc_rotate); // L-R baseband spun down to 0 Hz, 48 kHz rate
 
       int16_t *wp = (int16_t *)dp;
       for(int n= 0; n < audio_L; n++){
@@ -500,7 +497,7 @@ void *decode(void *arg){
 	//	subc_phasor *= subc_phasor * subc_phasor;       // triple to 57 kHz
 	//	subc_phasor /= approx_magf(subc_phasor);  // and normalize
 	//	float complex subc_info = conjf(subc_phasor) * rds->output.c[n];
-	float complex subc_info = rds->output.c[n];
+	float complex subc_info = rds.output.c[n];
 	// Need to add de-emphasis!
 	*wp++ = htons(scaleclip(__real__ subc_info));
 	*wp++ = htons(scaleclip(__imag__ subc_info));

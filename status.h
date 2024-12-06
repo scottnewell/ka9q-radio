@@ -18,15 +18,15 @@ enum pkt_type {
 // I try not to delete or rearrange these entries since that makes the different programs incompatible
 // with each other until they are all recompiled
 enum status_type {
-  EOL = 0,	  
+  EOL = 0,
   COMMAND_TAG,   // Echoes tag from requester
   CMD_CNT,       // Count of input commands
   GPS_TIME,      // Nanoseconds since GPS epoch (remember to update the leap second tables!)
 
   DESCRIPTION,   // Free form text describing source
-  UNUSED0,
-  UNUSED1,
-  UNUSED2,
+  STATUS_DEST_SOCKET,
+  SETOPTS,
+  CLEAROPTS,
   UNUSED3,
   UNUSED4,
   INPUT_SAMPRATE, // Nominal sample rate (integer)
@@ -90,13 +90,13 @@ enum status_type {
   PLL_BW,         // PLL loop bandwidth
   ENVELOPE,       // Envelope detection in linear mode
   UNUSED18,
-  
+
   // Demodulation status
   DEMOD_SNR,      // FM, PLL linear
   FREQ_OFFSET,    // FM, PLL linear
   PEAK_DEVIATION, // FM only
   PL_TONE,        // PL tone squelch frequency (FM only)
-  
+
   // Settable gain parameters
   AGC_ENABLE,     // boolean, linear modes only
   HEADROOM,       // Audio level headroom, stored as amplitude ratio, exchanged as dB
@@ -143,14 +143,18 @@ enum status_type {
 
   RF_ATTEN,       // Front end attenuation (introduced with rx888)
   RF_GAIN,        // Front end gain (introduced with rx888)
-  UNUSED10,
+  RF_AGC,         // Front end AGC on/off
   FE_LOW_EDGE,    // edges of front end filter
   FE_HIGH_EDGE,
   FE_ISREAL,        // Boolean, true -> front end uses real sampling, false -> front end uses complex
   BLOCKS_SINCE_POLL,  // Blocks since last poll
   AD_OVER,          // A/D full scale samples, proxy for overranges
   RTP_PT,           // Real Time Protocol Payload Type
-  STATUS_RATE,      // Automatically send channel status over *data* channel every STATUS_RATE frames
+  STATUS_INTERVAL,      // Automatically send channel status over *data* channel every STATUS_RATE frames
+  OUTPUT_ENCODING,    // Output data encoding (see enum encoding in multicast.h)
+  SAMPLES_SINCE_OVER, // Samples since last A/D overrange
+  PLL_WRAPS,          // Count of complete linear mode PLL rotations
+  RF_LEVEL_CAL,        // Adjustment relating dBm to dBFS
 };
 
 int encode_string(uint8_t **bp,enum status_type type,void const *buf,unsigned int buflen);

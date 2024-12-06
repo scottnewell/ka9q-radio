@@ -9,7 +9,6 @@
 #if defined(linux)
 #include <bsd/string.h>
 #endif
-#include <locale.h>
 #include <assert.h>
 #include <getopt.h>
 #include <sysexits.h>
@@ -19,15 +18,14 @@
 #include "multicast.h"
 #include "radio.h"
 
-struct sockaddr_storage Metadata_dest_address;      // Dest of metadata (typically multicast)
-struct sockaddr_storage Metadata_source_address;      // Source of metadata
+struct sockaddr_storage Metadata_dest_socket;      // Dest of metadata (typically multicast)
+struct sockaddr_storage Metadata_source_socket;      // Source of metadata
 int IP_tos;
 int Mcast_ttl = 1;
 const char *App_path;
 const char *Target;
 int Verbose;
 uint32_t Ssrc;
-char Locale[256] = "en_US.UTF-8";
 char Iface[1024]; // Multicast interface to talk to front end
 int Status_fd,Ctl_fd;
 int64_t Timeout = BILLION; // Retransmission timeout
@@ -102,29 +100,20 @@ int main(int argc,char *argv[]){
       }
     }
   }
-  {
-    // The display thread assumes en_US.UTF-8, or anything with a thousands grouping character
-    // Otherwise the cursor movements will be wrong
-    char const * const cp = getenv("LANG");
-    if(cp != NULL){
-      strlcpy(Locale,cp,sizeof(Locale));
-    }
-  }
-  setlocale(LC_ALL,Locale); // Set either the hardwired default or the value of $LANG if it exists
   if(argc <= optind)
     help();
 
   Target = argv[optind];
-  resolve_mcast(Target,&Metadata_dest_address,DEFAULT_STAT_PORT,Iface,sizeof(Iface));
+  resolve_mcast(Target,&Metadata_dest_socket,DEFAULT_STAT_PORT,Iface,sizeof(Iface),0);
   if(Verbose)
-    fprintf(stderr,"Resolved %s -> %s\n",Target,formatsock(&Metadata_dest_address));
+    fprintf(stderr,"Resolved %s -> %s\n",Target,formatsock(&Metadata_dest_socket));
 
-  Status_fd = listen_mcast(&Metadata_dest_address,Iface);
+  Status_fd = listen_mcast(&Metadata_dest_socket,Iface);
   if(Status_fd == -1){
     fprintf(stderr,"Can't listen to mcast status %s\n",Target);
     exit(1);
   }
-  Ctl_fd = connect_mcast(&Metadata_dest_address,Iface,Mcast_ttl,IP_tos);
+  Ctl_fd = connect_mcast(&Metadata_dest_socket,Iface,Mcast_ttl,IP_tos);
   if(Ctl_fd < 0){
     fprintf(stderr,"connect to mcast control failed\n");
     exit(1);
@@ -182,8 +171,8 @@ int main(int argc,char *argv[]){
       if(!FD_ISSET(Status_fd,&fdset))
 	continue;
       // Read message on the multicast group
-      socklen_t ssize = sizeof(Metadata_source_address);
-      length = recvfrom(Status_fd,buffer,sizeof(buffer),0,(struct sockaddr *)&Metadata_source_address,&ssize);
+      socklen_t ssize = sizeof(Metadata_source_socket);
+      length = recvfrom(Status_fd,buffer,sizeof(buffer),0,(struct sockaddr *)&Metadata_source_socket,&ssize);
     
       // Ignore invalid packets, non-status packets, packets re other SSRCs and packets not in response to our polls
       // Should we insist on the same command tag, or accept any "recent" status packet, e.g., triggered by the control program?
@@ -218,7 +207,7 @@ int main(int argc,char *argv[]){
     // npower even: emit N/2....N-1 0....N/2-1
     int const first_neg_bin = (npower + 1)/2; // round up, e.g., 64->32, 65 -> 33, 66 -> 33
     float base = r_freq - r_bin_bw * (npower/2); // integer truncation (round down), e.g., 64-> 32, 65 -> 32
-    printf(" %.0f, %.0f, %.0f, %d,",
+    printf(" %.0f, %.0f, %.0f, %d",
 	   base, base + r_bin_bw * (npower-1), r_bin_bw, npower);
 
 #if TESTING
@@ -235,10 +224,10 @@ int main(int argc,char *argv[]){
     }
 #else
     for(int i= first_neg_bin; i < npower; i++)
-      printf(" %.1f,",(powers[i] == 0) ? -100.0 : 10*log10(powers[i]));
+      printf(", %.1f",(powers[i] == 0) ? -100.0 : 10*log10(powers[i]));
     // Frequencies above center
     for(int i=0; i < first_neg_bin; i++)
-      printf(" %.1f,",(powers[i] == 0) ? -100.0 : 10*log10(powers[i]));
+      printf(", %.1f",(powers[i] == 0) ? -100.0 : 10*log10(powers[i]));
 #endif
     printf("\n");
     if(--count == 0)
