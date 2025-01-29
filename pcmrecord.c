@@ -31,6 +31,7 @@ Command-line options:
  --ssrc <ssrc>: Select one SSRC (recommended for --stdout)
  --version|-V: display command version
  --max_length|-x: <seconds> maximum file duration, in seconds. Don't pad the wav file with silence. Exit when all files have reached max duration.
+ --wd_mode|-W: wsprdeamon mode, sync start to multiple of --lengthlimit (defaults to 60 seconds if omitted), and also implies --jt file name format
 @endverbatim
  */
 
@@ -70,6 +71,13 @@ Command-line options:
 #define BUFFERSIZE (8192) // probably the same as default
 #define RESEQ 64 // size of resequence queue. Probably excessive; WiFi reordering is rarely more than 4-5 packets
 #define OPUS_SAMPRATE 48000 // Opus always operates at 48 kHz virtual sample rate
+
+enum sync_state_t
+{
+  sync_state_startup,           // any second; waiting for data to arrive in second :59
+  sync_state_armed,             // second :59; waiting for data to arrive in second :00 to sync
+  sync_state_active,            // recording data to file, wait for final samples to complete file
+};
 
 // Simplified .wav file header
 // http://soundfile.sapp.org/doc/WaveFormat/
@@ -175,6 +183,8 @@ struct session {
   int64_t samples_remaining;   // Samples remaining before file is closed; 0 means indefinite
   struct timespec file_time;
   bool complete;
+
+  enum sync_state_t sync_state;
 };
 
 
@@ -194,6 +204,7 @@ static bool Flushmode = false; // Flush after each packet when writing to standa
 static const char *Command = NULL;
 static bool Jtmode = false;
 static bool Raw = false;
+static bool wd_mode = false;
 
 const char *App_path;
 static int Input_fd,Status_fd;
@@ -238,9 +249,10 @@ static struct option Options[] = {
   {"ssrc", required_argument, NULL, 'S'},
   {"version", no_argument, NULL, 'V'},
   {"max_length", required_argument, NULL, 'x'},
+  {"wd_mode", no_argument, NULL, 'W'},
   {NULL, no_argument, NULL, 0},
 };
-static char Optstring[] = "cd:e:fjl:m:rsS:t:vL:Vx:";
+static char Optstring[] = "cd:e:fjl:m:rsS:t:vL:Vx:W";
 
 int main(int argc,char *argv[]){
   App_path = argv[0];
@@ -306,8 +318,15 @@ int main(int argc,char *argv[]){
     case 'V':
       VERSION();
       exit(EX_OK);
+    case 'W':
+      wd_mode = true;
+      Jtmode = true;
+      if (0 == FileLengthLimit){
+        FileLengthLimit = 60;
+      }
+      break;
     default:
-      fprintf(stderr,"Usage: %s [-c|--catmode|--stdout] [-r|--raw] [-e|--exec command] [-f|--flush] [-s] [-d directory] [-l locale] [-L maxtime] [-t timeout] [-j|--jt] [-v] [-m sec] [-x|--max_length max_file_time, no sync, oneshot] PCM_multicast_address\n",argv[0]);
+      fprintf(stderr,"Usage: %s [-c|--catmode|--stdout] [-r|--raw] [-e|--exec command] [-f|--flush] [-s] [-d directory] [-l locale] [-L maxtime] [-t timeout] [-j|--jt] [-v] [-m sec] [-x|--max_length max_file_time, no sync, oneshot] [--wd_mode|-W] PCM_multicast_address\n",argv[0]);
       exit(EX_USAGE);
       break;
     }
@@ -366,6 +385,91 @@ int main(int argc,char *argv[]){
   input_loop(); // Doesn't return
 
   exit(EX_OK);
+}
+
+int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds){
+  if(NULL == sp->fp)
+    return -1;
+
+  // save to file
+  int framesize = sp->channels * (sp->encoding == F32LE ? 4 : 2); // bytes per sample time
+  int frames = buffer_size / framesize;  // One frame per sample time
+  fwrite(samples,framesize,frames,sp->fp);
+  sp->total_file_samples += frames;
+  sp->current_segment_samples += frames;
+  if(sp->current_segment_samples >= SubstantialFileTime * sp->samprate)
+    sp->substantial_file = true;
+  sp->samples_written += frames;
+  sp->samples_remaining -= frames;
+
+  if(sp->samples_remaining <= 0)
+  {
+    close_file(sp);
+    // should be all. Are we in second :59?
+    if (seconds == (FileLengthLimit - 1)){
+      sp->sync_state = sync_state_armed;
+      return 0;
+    }
+    else{
+      fprintf(stderr,"Ended file in second %d, possibly dropped samples?!\n",seconds);
+      sp->sync_state = sync_state_startup;
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static void wd_state_machine(struct session * const sp,struct sockaddr const *sender,void *samples,int buffer_size){
+  if (!wd_mode || NULL == sp){
+    return;
+  }
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME,&now);
+
+  int seconds = now.tv_sec % (time_t)FileLengthLimit;
+
+  switch(sp->sync_state){
+  default:
+  case sync_state_startup:
+    // spin until we see samples arrive in second 59
+    if (seconds == (FileLengthLimit - 1)){
+      // data arrived in second 59, so go to armed state
+      sp->sync_state = sync_state_armed;
+    }
+    break;
+
+  case sync_state_armed:
+    // drop samples until we're in second 0
+    if (0 == seconds){
+      // first packet in :00, so start recording the file
+      sp->sync_state = sync_state_active;
+
+      if(sp->fp == NULL && !sp->complete){
+        // create new file in second :00
+        session_file_init(sp,sender);
+        sp->sync_state = sync_state_active;
+        start_wav_stream(sp);
+        if (0 != wd_write(sp,samples,buffer_size,seconds)){
+          // something went wrong...should we delete the file?
+          sp->sync_state=sync_state_startup;
+          close_file(sp);
+        }
+      }
+    }
+    break;
+
+  case sync_state_active:
+    if(NULL == sp->fp)
+      return;
+
+    // save to file until file is complete
+    if (0 != wd_write(sp,samples,buffer_size,seconds)){
+      // something went wrong...should we delete the file?
+      sp->sync_state=sync_state_startup;
+      close_file(sp);
+    }
+    break;
+  }
 }
 
 static void closedown(int a){
@@ -758,7 +862,8 @@ static void input_loop(){
 	sp->prev = NULL;
 	Sessions = sp;
       }
-      if(sp->fp == NULL && !sp->complete){
+
+      if(sp->fp == NULL && !sp->complete && !wd_mode){
 	session_file_init(sp,&sender);
 	if(sp->encoding == OPUS){
 	  if(Raw)
@@ -782,6 +887,21 @@ static void input_loop(){
 	}
       }
       sp->last_active = gps_time_ns();
+
+      if (wd_mode){
+        if(sp->encoding == S16BE){
+          // Flip endianness from big-endian on network to little endian wanted by .wav
+          // byteswap.h is linux-specific; need to find a portable way to get the machine instructions
+          int16_t const * const samples = (int16_t *)dp;
+          int16_t *wp = (int16_t *)dp;
+          int samp_count = size / sizeof(int16_t);
+          for(int n = 0; n < samp_count; n++)
+            wp[n] = bswap_16((uint16_t)samples[n]);
+        }
+        wd_state_machine(sp,&sender,dp,size);
+        goto datadone;
+      }
+
       if(sp->rtp_state.odd_seq_set){
 	if(rtp.seq == sp->rtp_state.odd_seq){
 	  // Sender probably restarted; flush queue and start over
@@ -873,7 +993,6 @@ static void input_loop(){
   }
 }
 
-
 static void cleanup(void){
   while(Sessions){
     // Flush and close each write stream
@@ -883,10 +1002,10 @@ static void cleanup(void){
     Sessions = next_s;
   }
 }
+
 int session_file_init(struct session *sp,struct sockaddr const *sender){
   if(sp->fp != NULL)
     return 0;
-
   sp->starting_offset = 0;
   sp->samples_remaining = 0;
 
@@ -1018,6 +1137,12 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   }
   if (max_length > 0)
     sp->samples_remaining = max_length * sp->samprate;
+
+  if (wd_mode){
+    sp->starting_offset = 0;
+    sp->samples_remaining = FileLengthLimit * sp->samprate;
+    sp->sync_state = sync_state_startup;
+  }
 
   if(Jtmode){
     //  K1JT-format file names in flat directory
