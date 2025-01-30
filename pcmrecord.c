@@ -436,11 +436,12 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
   // if packets are missing, we'll run over time first
   double delta = time_diff(now,sp->file_time);
   if (delta >= FileLengthLimit){
-    fprintf(stderr,"Hit deadline--missing samples?! %ld samples in %.6f seconds, %.3f Hz (second %d)\n",
-              sp->total_file_samples,
-              delta,
-              sp->total_file_samples / delta,
-              seconds);
+    fprintf(stderr,"Hit deadline--missing samples?! %ld samples in %.6f seconds, %.3f Hz (second %d) on SSRC %d\n",
+            sp->total_file_samples,
+            delta,
+            sp->total_file_samples / delta,
+            seconds,
+            sp->ssrc);
     close_file(sp);
     sp->sync_state = sync_state_startup;
     return -1;
@@ -450,11 +451,12 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
   {
     // Should be in :59 at end of recording...are we?
     if (seconds != (FileLengthLimit - 1)){
-      fprintf(stderr,"File end error--extra samples?! %ld samples in %.6f seconds, %.3f Hz (second %d)\n",
+      fprintf(stderr,"File end error--extra samples?! %ld samples in %.6f seconds, %.3f Hz (second %d) on SSRC %d\n",
               sp->total_file_samples,
               delta,
               sp->total_file_samples / delta,
-              seconds);
+              seconds,
+              sp->ssrc);
       close_file(sp);
       sp->sync_state = sync_state_startup;
       return -1;
