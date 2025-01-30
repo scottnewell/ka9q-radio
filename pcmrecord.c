@@ -185,6 +185,7 @@ struct session {
   bool complete;
 
   enum sync_state_t sync_state;
+  struct timespec end_time;
 };
 
 
@@ -205,6 +206,7 @@ static const char *Command = NULL;
 static bool Jtmode = false;
 static bool Raw = false;
 static bool wd_mode = false;
+static int force_sample_rate_error = 0;
 
 const char *App_path;
 static int Input_fd,Status_fd;
@@ -250,9 +252,10 @@ static struct option Options[] = {
   {"version", no_argument, NULL, 'V'},
   {"max_length", required_argument, NULL, 'x'},
   {"wd_mode", no_argument, NULL, 'W'},
+  {"error", required_argument, NULL, 'E'},
   {NULL, no_argument, NULL, 0},
 };
-static char Optstring[] = "cd:e:fjl:m:rsS:t:vL:Vx:W";
+static char Optstring[] = "cd:e:fjl:m:rsS:t:vL:Vx:WE:";
 
 int main(int argc,char *argv[]){
   App_path = argv[0];
@@ -325,6 +328,15 @@ int main(int argc,char *argv[]){
         FileLengthLimit = 60;
       }
       break;
+    case 'E':
+      {
+	char *ptr;
+	int32_t x = strtol(optarg,&ptr,0);
+	if(ptr != optarg)
+	  force_sample_rate_error = x;
+      }
+      fprintf(stderr,"Warning: sample count error forced to %+d samples\n",force_sample_rate_error);
+      break;
     default:
       fprintf(stderr,"Usage: %s [-c|--catmode|--stdout] [-r|--raw] [-e|--exec command] [-f|--flush] [-s] [-d directory] [-l locale] [-L maxtime] [-t timeout] [-j|--jt] [-v] [-m sec] [-x|--max_length max_file_time, no sync, oneshot] [--wd_mode|-W] PCM_multicast_address\n",argv[0]);
       exit(EX_USAGE);
@@ -387,7 +399,13 @@ int main(int argc,char *argv[]){
   exit(EX_OK);
 }
 
-int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds){
+static double time_diff(struct timespec x,struct timespec y){
+  double xd = (1.0e-9 * x.tv_nsec) + x.tv_sec;
+  double yd = (1.0e-9 * y.tv_nsec) + y.tv_sec;
+  return xd - yd;
+}
+
+int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds,struct timespec now){
   if(NULL == sp->fp)
     return -1;
 
@@ -402,18 +420,36 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
   sp->samples_written += frames;
   sp->samples_remaining -= frames;
 
+  // if packets are missing, we'll run over time first
+  double delta = time_diff(now,sp->file_time);
+  if (delta >= FileLengthLimit){
+    fprintf(stderr,"Hit deadline--missing samples?! %ld samples in %.6f seconds, %.3f Hz (second %d)\n",
+              sp->total_file_samples,
+              delta,
+              sp->total_file_samples / delta,
+              seconds);
+    close_file(sp);
+    sp->sync_state = sync_state_startup;
+    return -1;
+  }
+
   if(sp->samples_remaining <= 0)
   {
-    close_file(sp);
-    // should be all. Are we in second :59?
-    if (seconds == (FileLengthLimit - 1)){
-      sp->sync_state = sync_state_armed;
-      return 0;
-    }
-    else{
-      fprintf(stderr,"Ended file in second %d, possibly dropped samples?!\n",seconds);
+    // Should be in :59 at end of recording...are we?
+    if (seconds != (FileLengthLimit - 1)){
+      fprintf(stderr,"File end error--missing samples?! %ld samples in %.6f seconds, %.3f Hz (second %d)\n",
+              sp->total_file_samples,
+              delta,
+              sp->total_file_samples / delta,
+              seconds);
+      close_file(sp);
       sp->sync_state = sync_state_startup;
       return -1;
+    }
+    else{
+      close_file(sp);
+      sp->sync_state = sync_state_armed;
+      return 0;
     }
   }
   return 0;
@@ -449,7 +485,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         session_file_init(sp,sender);
         sp->sync_state = sync_state_active;
         start_wav_stream(sp);
-        if (0 != wd_write(sp,samples,buffer_size,seconds)){
+        if (0 != wd_write(sp,samples,buffer_size,seconds,now)){
           // something went wrong...should we delete the file?
           sp->sync_state=sync_state_startup;
           close_file(sp);
@@ -463,7 +499,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
       return;
 
     // save to file until file is complete
-    if (0 != wd_write(sp,samples,buffer_size,seconds)){
+    if (0 != wd_write(sp,samples,buffer_size,seconds,now)){
       // something went wrong...should we delete the file?
       sp->sync_state=sync_state_startup;
       close_file(sp);
@@ -1141,7 +1177,9 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   if (wd_mode){
     sp->starting_offset = 0;
     sp->samples_remaining = FileLengthLimit * sp->samprate;
+    sp->samples_remaining += force_sample_rate_error;
     sp->sync_state = sync_state_startup;
+    sp->file_time = now;
   }
 
   if(Jtmode){
@@ -1300,7 +1338,6 @@ static int close_session(struct session **spp){
   return 0;
 }
 
-
 // Close a file, update .wav header
 // If the file is not "substantial", just delete it
 static int close_file(struct session *sp){
@@ -1329,6 +1366,10 @@ static int close_file(struct session *sp){
       int fd = fileno(sp->fp);
       attrprintf(fd,"samples written","%lld",sp->samples_written);
       attrprintf(fd,"total samples","%lld",sp->total_file_samples);
+      struct timespec now;
+      clock_gettime(CLOCK_REALTIME,&now);
+      attrprintf(fd,"end time","%ld.%09ld",(long)now.tv_sec,(long)now.tv_nsec);
+      attrprintf(fd,"elapsed","%.6f",time_diff(now,sp->file_time));
     } else if(strlen(sp->filename) > 0){
       if(unlink(sp->filename) != 0)
 	fprintf(stderr,"Can't unlink %s: %s\n",sp->filename,strerror(errno));
