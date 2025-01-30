@@ -186,6 +186,7 @@ struct session {
 
   enum sync_state_t sync_state;
   struct timespec end_time;
+  uint32_t last_rtp_ts;
 };
 
 
@@ -405,13 +406,22 @@ static double time_diff(struct timespec x,struct timespec y){
   return xd - yd;
 }
 
-int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds,struct timespec now){
+int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds,struct timespec now,uint32_t rtp_ts){
   if(NULL == sp->fp)
     return -1;
 
   // save to file
   int framesize = sp->channels * (sp->encoding == F32LE ? 4 : 2); // bytes per sample time
   int frames = buffer_size / framesize;  // One frame per sample time
+
+  // is the rtp->timestamp (sample count?) value reasonable compared
+  // to last time?
+  if (sp->no_offset && ((rtp_ts - sp->last_rtp_ts) > (uint32_t)(1600 / framesize))){
+    fprintf(stderr,"Weird rtp->timestamp %u compared to last time %u, delta %u\n",
+            rtp_ts,sp->last_rtp_ts,rtp_ts - sp->last_rtp_ts);
+  }
+  sp->last_rtp_ts = rtp_ts;
+
   fwrite(samples,framesize,frames,sp->fp);
   sp->total_file_samples += frames;
   sp->current_segment_samples += frames;
@@ -455,7 +465,7 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
   return 0;
 }
 
-static void wd_state_machine(struct session * const sp,struct sockaddr const *sender,void *samples,int buffer_size){
+static void wd_state_machine(struct session * const sp,struct sockaddr const *sender,void *samples,int buffer_size,uint32_t rtp_ts){
   if (!wd_mode || NULL == sp){
     return;
   }
@@ -485,7 +495,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         session_file_init(sp,sender);
         sp->sync_state = sync_state_active;
         start_wav_stream(sp);
-        if (0 != wd_write(sp,samples,buffer_size,seconds,now)){
+        if (0 != wd_write(sp,samples,buffer_size,seconds,now,rtp_ts)){
           // something went wrong...should we delete the file?
           sp->sync_state=sync_state_startup;
           close_file(sp);
@@ -499,7 +509,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
       return;
 
     // save to file until file is complete
-    if (0 != wd_write(sp,samples,buffer_size,seconds,now)){
+    if (0 != wd_write(sp,samples,buffer_size,seconds,now,rtp_ts)){
       // something went wrong...should we delete the file?
       sp->sync_state=sync_state_startup;
       close_file(sp);
@@ -934,7 +944,7 @@ static void input_loop(){
           for(int n = 0; n < samp_count; n++)
             wp[n] = bswap_16((uint16_t)samples[n]);
         }
-        wd_state_machine(sp,&sender,dp,size);
+        wd_state_machine(sp,&sender,dp,size,rtp.timestamp);
         goto datadone;
       }
 
