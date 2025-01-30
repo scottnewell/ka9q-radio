@@ -186,7 +186,7 @@ struct session {
 
   enum sync_state_t sync_state;
   struct timespec end_time;
-  uint32_t last_rtp_ts;
+  uint32_t next_expected_rtp_ts;
 };
 
 
@@ -416,11 +416,14 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
 
   // is the rtp->timestamp (sample count?) value reasonable compared
   // to last time?
-  if (sp->no_offset && ((rtp_ts - sp->last_rtp_ts) > (uint32_t)(1600 / framesize))){
-    fprintf(stderr,"Weird rtp->timestamp %u compared to last time %u, delta %u\n",
-            rtp_ts,sp->last_rtp_ts,rtp_ts - sp->last_rtp_ts);
+  if ((0 != sp->total_file_samples) && (rtp_ts != sp->next_expected_rtp_ts)){
+      fprintf(stderr,"Weird rtp->timestamp: expected %u, received %u (delta %d) on SSRC %d\n",
+              sp->next_expected_rtp_ts,
+              rtp_ts,
+              rtp_ts - sp->next_expected_rtp_ts,
+              sp->ssrc);
   }
-  sp->last_rtp_ts = rtp_ts;
+  sp->next_expected_rtp_ts = rtp_ts + frames;    // next expected RTP timestamp
 
   fwrite(samples,framesize,frames,sp->fp);
   sp->total_file_samples += frames;
@@ -447,7 +450,7 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
   {
     // Should be in :59 at end of recording...are we?
     if (seconds != (FileLengthLimit - 1)){
-      fprintf(stderr,"File end error--missing samples?! %ld samples in %.6f seconds, %.3f Hz (second %d)\n",
+      fprintf(stderr,"File end error--extra samples?! %ld samples in %.6f seconds, %.3f Hz (second %d)\n",
               sp->total_file_samples,
               delta,
               sp->total_file_samples / delta,
