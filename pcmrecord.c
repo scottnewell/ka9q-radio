@@ -77,6 +77,7 @@ enum sync_state_t
   sync_state_startup,           // any second; waiting for data to arrive in second :59
   sync_state_armed,             // second :59; waiting for data to arrive in second :00 to sync
   sync_state_active,            // recording data to file, wait for final samples to complete file
+  sync_state_last_second,       // recording data to file in :59
 };
 
 // Simplified .wav file header
@@ -514,7 +515,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         start_wav_stream(sp);
         if (0 != wd_write(sp,samples,buffer_size,seconds,now,rtp_ts)){
           // something went wrong...should we delete the file?
-          sp->sync_state=sync_state_startup;
+          sp->sync_state = sync_state_startup;
           close_file(sp);
         }
       }
@@ -522,13 +523,44 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
     break;
 
   case sync_state_active:
-    if(NULL == sp->fp)
+    if(NULL == sp->fp){
+      sp->sync_state = sync_state_startup;
       return;
+    }
 
     // save to file until file is complete
     if (0 != wd_write(sp,samples,buffer_size,seconds,now,rtp_ts)){
       // something went wrong...should we delete the file?
-      sp->sync_state=sync_state_startup;
+      sp->sync_state = sync_state_startup;
+      close_file(sp);
+    }
+    if ((seconds == (FileLengthLimit -1) && (sync_state_active == sp->sync_state))){
+      sp->sync_state = sync_state_last_second;
+    }
+    break;
+
+  case sync_state_last_second:
+    if(NULL == sp->fp){
+      sp->sync_state = sync_state_startup;
+      return;
+    }
+
+    if (0 == seconds){
+      // just in case we hit the :59->:00 edge before the file is complete
+      // in that case, abort/error the current file and start fresh
+      fprintf(stderr,"%s: hit :00 before sample count was reached on SSRC %d\n",
+              wd_time(),
+              sp->ssrc);
+      close_file(sp);
+
+      // create new file in second :00
+      session_file_init(sp,sender);
+      sp->sync_state = sync_state_active;
+      start_wav_stream(sp);
+    }
+    if (0 != wd_write(sp,samples,buffer_size,seconds,now,rtp_ts)){
+      // something went wrong...should we delete the file?
+      sp->sync_state = sync_state_startup;
       close_file(sp);
     }
     break;
