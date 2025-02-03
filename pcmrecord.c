@@ -406,7 +406,16 @@ static double time_diff(struct timespec x,struct timespec y){
   return xd - yd;
 }
 
-int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds,struct timespec now,uint32_t rtp_ts){
+static const char *wd_time(){
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME,&now);
+  struct tm *tm_now = gmtime(&now.tv_sec);;
+  static char timebuff[512];
+  strftime(timebuff,sizeof(timebuff),"%a %d %b %Y %H:%M:%S %Z",tm_now);
+  return timebuff;
+}
+
+static int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds,struct timespec now,uint32_t rtp_ts){
   if(NULL == sp->fp)
     return -1;
 
@@ -417,7 +426,8 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
   // is the rtp->timestamp (sample count?) value reasonable compared
   // to last time?
   if ((0 != sp->total_file_samples) && (rtp_ts != sp->next_expected_rtp_ts)){
-      fprintf(stderr,"Weird rtp->timestamp: expected %u, received %u (delta %d) on SSRC %d\n",
+      fprintf(stderr,"%s: Weird rtp->timestamp: expected %u, received %u (delta %d) on SSRC %d\n",
+              wd_time(),
               sp->next_expected_rtp_ts,
               rtp_ts,
               rtp_ts - sp->next_expected_rtp_ts,
@@ -436,7 +446,8 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
   // if packets are missing, we'll run over time first
   double delta = time_diff(now,sp->file_time);
   if (delta >= FileLengthLimit){
-    fprintf(stderr,"Hit deadline--missing samples?! %ld samples in %.6f seconds, %.3f Hz (second %d) on SSRC %d\n",
+    fprintf(stderr,"%s: Hit deadline--missing samples?! %ld samples in %.6f seconds, %.3f Hz (second %d) on SSRC %d\n",
+            wd_time(),
             sp->total_file_samples,
             delta,
             sp->total_file_samples / delta,
@@ -451,7 +462,8 @@ int wd_write(struct session * const sp,void *samples,int buffer_size,int seconds
   {
     // Should be in :59 at end of recording...are we?
     if (seconds != (FileLengthLimit - 1)){
-      fprintf(stderr,"File end error--extra samples?! %ld samples in %.6f seconds, %.3f Hz (second %d) on SSRC %d\n",
+      fprintf(stderr,"%s: File end error--extra samples?! %ld samples in %.6f seconds, %.3f Hz (second %d) on SSRC %d\n",
+              wd_time(),
               sp->total_file_samples,
               delta,
               sp->total_file_samples / delta,
