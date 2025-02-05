@@ -419,7 +419,10 @@ static const char *wd_time(){
   clock_gettime(CLOCK_REALTIME,&now);
   struct tm *tm_now = gmtime(&now.tv_sec);;
   static char timebuff[256];
-  strftime(timebuff,sizeof(timebuff),"%a %d %b %Y %H:%M:%S UTC",tm_now);
+  size_t s = strftime(timebuff,sizeof(timebuff),"%a %d %b %Y %H:%M:%S",tm_now);
+  if (s) {
+    snprintf(&timebuff[s],sizeof(timebuff)-s,".%03lu UTC", now.tv_nsec / 1000000);
+  }
   return timebuff;
 }
 
@@ -548,6 +551,14 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         // create new file in second :00
         session_file_init(sp,sender);
         sp->sync_state = sync_state_active;
+
+        // spit out the estimated start time of the stream, based on sample rate and RTP timestamp, ignoring rollovers
+        wd_log(1, ": start file on SSRC %d with seq %u timestamp %u, estimated stream start is %u s ago\n",
+               sp->ssrc,
+               sp->rtp_state.seq,
+               sp->rtp_state.timestamp,
+               sp->rtp_state.timestamp / sp->samprate);
+
         start_wav_stream(sp);
         if (0 != wd_write(sp,samples,buffer_size,seconds,now)){
           // something went wrong...should we delete the file?
