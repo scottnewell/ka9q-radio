@@ -484,7 +484,7 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,int 
   if (0 == sp->total_file_samples){
     //wd_log(1,"total_file_samples == 0: first sample in file\n");
     if (0 != seconds){
-      wd_log(0,"First sample NOT in second :00...resync at next interval\n");
+      wd_log(0,"First sample NOT in second :00...resync at next interval on SSRC %d\n", sp->ssrc);
       sp->sync_state = sync_state_resync;
     } else {
       //wd_log(1,"First sample is in second :00\n");
