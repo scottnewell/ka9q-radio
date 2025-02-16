@@ -331,7 +331,7 @@ int main(int argc,char *argv[]){
       break;
     case 'V':
       VERSION();
-      fputs("wsprdaemon mode (-W): v0.4\n",stdout);
+      fputs("wsprdaemon mode (-W): v0.5\n",stdout);
       exit(EX_OK);
     case 'W':
       wd_mode = true;
@@ -559,7 +559,7 @@ static bool grab_queue_stats(uint32_t *tx_queue_depth,uint32_t *rx_queue_depth,u
           strtok(0," ");
           strtok(0," ");
           char *d = strtok(0," ");
-          *drops = strtoul(d,0,16);
+          *drops = strtoul(d,0,10);
           *tx_queue_depth = strtoul(tq,0,16);
           *rx_queue_depth = strtoul(rq,0,16);
           FREE(src_addr);
