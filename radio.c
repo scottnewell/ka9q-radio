@@ -82,9 +82,8 @@ struct channel *create_chan(uint32_t ssrc){
     chan->inuse = true;
     chan->output.rtp.ssrc = ssrc; // Stash it
     Active_channel_count++;
+    chan->lifetime = 20 * 1000 / Blocktime; // If freq == 0, goes away 20 sec after last command
   }
-  chan->lifetime = 20 * 1000 / Blocktime; // If freq == 0, goes away 20 sec after last command
-
   pthread_mutex_unlock(&Channel_list_mutex);
   return chan;
 }
@@ -103,6 +102,7 @@ static float estimate_noise(struct channel *chan,int shift){
   assert(slave != NULL);
   if(slave == NULL)
     return NAN;
+  // Should do some range checking on 'shift'
   if(chan->filter.energies == NULL)
     chan->filter.energies = calloc(sizeof *chan->filter.energies,slave->bins);
 
@@ -111,45 +111,38 @@ static float estimate_noise(struct channel *chan,int shift){
   // slave->next_jobnum already incremented by execute_filter_output
   complex float const * const fdomain = master->fdomain[(slave->next_jobnum - 1) % ND];
 
-#undef PARSEVAL
-#ifdef PARSEVAL // Test code to sum all bins, verify Parseval's theorem
-  {
-    float total_energy = 0;
-    for(int i=0; i < master->bins; i++)
-      total_energy += cnrmf(fdomain[i]);
-    // Compute average power per sample, should match input level calculated in time domain
-    chan->tp1 = power2dB(total_energy) - voltage2dB((float)master->bins + Frontend.reference);
-  }
-#endif
 
-  int mbin = shift - slave->bins/2;
   float min_bin_energy = INFINITY;
   if(master->in_type == REAL){
-    // Only half as many bins as with complex input
-    for(int i=0; i < slave->bins; i++){
-      int n = abs(mbin); // Doesn't really handle the mirror well
-      if(n < master->bins){
-	if(energies[i] == 0)
-	  energies[i] = cnrmf(fdomain[n]); // Quick startup
-	else
-	  energies[i] += (cnrmf(fdomain[n]) - energies[i]) * N0_smooth; // blocknum was already incremented
-	if(min_bin_energy > energies[i])
-	  min_bin_energy = energies[i];
-      } else
-	break;  // off the end
-      mbin++;
+    // Only half as many bins as with complex input, all positive or all negative
+    int mbin = abs(shift) - slave->bins/2; // if shift < 0, inverted real spectrum
+    for(int i=0; i < slave->bins && mbin < master->bins; i++,mbin++){
+      if(mbin >= 0){
+	if(energies[i] == 0){
+	  // Bias first estimate high to keep it from being considered until
+	  // it's had a chance to settle down to a better average
+	  energies[i] = 10 * cnrmf(fdomain[mbin]);
+	} else {
+	  energies[i] += (cnrmf(fdomain[mbin]) - energies[i]) * N0_smooth;
+	  if(min_bin_energy > energies[i])
+	    min_bin_energy = energies[i];
+	}
+      }
     }
   } else {
+    int mbin = shift - slave->bins/2; // Start at lower channel edge (upper for inverted real)
     // Complex input that often straddles DC
     if(mbin < 0)
       mbin += master->bins; // starting in negative frequencies
+    assert(mbin >= 0 && mbin < master->bins); // probably should just return without doing anything
 
     for(int i=0; i < slave->bins; i++){
-      if(mbin >= 0 && mbin < master->bins){
-	if(energies[i] == 0)
-	  energies[i] = cnrmf(fdomain[mbin]); // Quick startup
-	else
-	  energies[i] += (cnrmf(fdomain[mbin]) - energies[i]) * N0_smooth; // blocknum was already incremented
+      if(energies[i] == 0) {
+	// Bias first estimate high to keep it from being considered until
+	// it's had a chance to settle down to a better average
+	energies[i] = 10 * cnrmf(fdomain[mbin]); // Quick startup
+      } else {
+	energies[i] += (cnrmf(fdomain[mbin]) - energies[i]) * N0_smooth;
 	if(min_bin_energy > energies[i])
 	  min_bin_energy = energies[i];
       }
@@ -172,7 +165,7 @@ static float estimate_noise(struct channel *chan,int shift){
 
   // For real mode the sample rate is double for the same power, but there are
   // only half as many bins so it cancels
-  return min_bin_energy / Frontend.samprate; // Scale to 1 Hz
+  return (float)(min_bin_energy / Frontend.samprate); // Scale to 1 Hz
 }
 
 
@@ -222,7 +215,6 @@ int start_demod(struct channel * chan){
     fprintf(stdout,"start_demod: ssrc %'u, output %s, demod %d, freq %'.3lf, preset %s, filter (%'+.0f,%'+.0f)\n",
 	    chan->output.rtp.ssrc, chan->output.dest_string, chan->demod_type, chan->tune.freq, chan->preset, chan->filter.min_IF, chan->filter.max_IF);
   }
-  ASSERT_ZEROED(&chan->demod_thread,sizeof chan->demod_thread);
   pthread_create(&chan->demod_thread,NULL,demod_thread,chan);
   return 0;
 }
@@ -263,6 +255,7 @@ int close_chan(struct channel *chan){
   return 0;
 }
 
+pthread_mutex_t Freq_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Set receiver frequency
 // The new IF is computed here only to determine if the front end needs retuning
@@ -281,6 +274,7 @@ double set_freq(struct channel * const chan,double const f){
   if(f == 0)
     return f;
 
+  pthread_mutex_lock(&Freq_mutex); // Protect front end tuner
   // Determine new IF
   double new_if = f - Frontend.frequency;
 
@@ -288,20 +282,19 @@ double set_freq(struct channel * const chan,double const f){
   // Tune an extra kHz to account for front end roundoff
   // Ideally the front end would just round in a preferred direction
   // but it doesn't know where our IF will be so it can't make the right choice
+  // Retuning the front end will cause all the other channels to recalculate their own IFs
+  // What if the IF is wider than the receiver can supply?
   double const fudge = 1000;
   if(new_if > Frontend.max_IF - chan->filter.max_IF){
     // Retune LO1 as little as possible
     new_if = Frontend.max_IF - chan->filter.max_IF - fudge;
+    set_first_LO(chan,f - new_if);
   } else if(new_if < Frontend.min_IF - chan->filter.min_IF){
     // Also retune LO1 as little as possible
     new_if = Frontend.min_IF - chan->filter.min_IF + fudge;
-  } else
-    return f; // OK where it is
-
-  double const new_lo1 = f - new_if;
-  // the front end will send its actual new frequency in its status stream,
-  // the front end status decoder will pick it up, and the chans will recalculate their new LOs
-  set_first_LO(chan,new_lo1);
+    set_first_LO(chan,f - new_if);
+  }
+  pthread_mutex_unlock(&Freq_mutex);
   return f;
 }
 
@@ -331,7 +324,6 @@ double set_first_LO(struct channel const * const chan,double const first_LO){
 // N = input fft length
 // M = input buffer overlap
 // samprate = input sample rate
-// adjust = complex value to multiply by each sample to correct phasing
 // remainder = fine LO frequency (double)
 // freq = frequency to mix by (double)
 // This version tunes to arbitrary FFT bin rotations and computes the necessary
@@ -439,6 +431,7 @@ void *sap_send(void *p){
 
     {
       char *mcast = strdup(formatsock(&chan->output.dest_socket,false));
+      assert(mcast != NULL);
       // Remove :port field, confuses the vlc listener
       char *cp = strchr(mcast,':');
       if(cp)
@@ -527,7 +520,11 @@ int downconvert(struct channel *chan){
       send_radio_status(&Metadata_dest_socket,&Frontend,chan); // Send status in response
       chan->status.global_timer = 0; // Just sent one
       // Also send to output stream
-      send_radio_status(&chan->status.dest_socket,&Frontend,chan);
+      if(chan->demod_type != SPECT_DEMOD){
+	// Only send spectrum on status channel, and only in response to poll
+	// Spectrum channel output socket isn't set anyway
+	send_radio_status(&chan->status.dest_socket,&Frontend,chan);
+      }
       chan->status.output_timer = chan->status.output_interval; // Reload
       FREE(chan->status.command);
       reset_radio_status(chan); // After both are sent
@@ -557,6 +554,17 @@ int downconvert(struct channel *chan){
     // end status changes rather than process zeroes. We must still poll the terminate flag.
     pthread_mutex_lock(&Frontend.status_mutex);
 
+    /* Note sign conventions:
+       When the radio frequency is above the front end frequency, as in direct sampling (Frontend.frequency == 0)
+       or in low side injection, tune.second_LO is negative and so is 'shift'
+
+       For the real A/D streams from TV tuners with high-side injection, e.g., Airspy R2,
+       tune.second_LO and shift are both positive and the spectrum is inverted
+
+       For complex SDRs, tune.second_LO can be either positive or negative, so shift will be negative or positive
+
+       Note minus on 'shift' parameter to execute_filter_output() and estimate_noise()
+    */
     chan->tune.second_LO = Frontend.frequency - chan->tune.freq;
     double const freq = chan->tune.doppler + chan->tune.second_LO; // Total logical oscillator frequency
     if(compute_tuning(Frontend.in.ilen + Frontend.in.impulse_length - 1,
@@ -601,11 +609,12 @@ int downconvert(struct channel *chan){
     // Be sure to Initialize chan->filter.bin_shift at startup to something bizarre to force this inequality on first call
     if(shift != chan->filter.bin_shift){
       const int V = 1 + (Frontend.in.ilen / (Frontend.in.impulse_length - 1)); // Overlap factor
-      chan->filter.phase_adjust = cispi(-2.0f*(shift % V)/(double)V); // Amount to rotate on each block for shifts not divisible by V
-      chan->fine.phasor *= cispi((shift - chan->filter.bin_shift) / (2.0f * (V-1))); // One time adjust for shift change
+      chan->filter.phase_adjust = cispi(-2.0*(shift % V)/(double)V); // Amount to rotate on each block for shifts not divisible by V
+      chan->fine.phasor *= cispi((shift - chan->filter.bin_shift) / (2.0 * (V-1))); // One time adjust for shift change
     }
     chan->fine.phasor *= chan->filter.phase_adjust;
   }
+  // Note minus on 'shift' parameter; see discussion inside compute_tuning() on sign conventions
   execute_filter_output(&chan->filter.out,-shift); // block until new data frame
   chan->status.blocks_since_poll++;
   if(buffer != NULL){ // No output time-domain buffer in spectral analysis mode
@@ -619,7 +628,7 @@ int downconvert(struct channel *chan){
     chan->sig.bb_power = energy;
     chan->sig.bb_energy += energy; // Added once per block
   }
-  chan->filter.bin_shift = shift; // We need this in any case (not really?)
+  chan->filter.bin_shift = shift; // Also used by spectrum.c:demod_spectrum() to know where to read direct from master
 
   // The N0 noise estimator has a long smoothing time constant, so clamp it when the front end is saturated, e.g. by a local transmitter
   // This works well for channels tuned well away from the transmitter, but not when a channel is tuned near or to the transmit frequency
@@ -630,6 +639,53 @@ int downconvert(struct channel *chan){
   maxpower *= maxpower * 0.5; // 0 dBFS
   if(Frontend.if_power < maxpower)
     chan->sig.n0 = estimate_noise(chan,-shift); // Negative, just like compute_tuning. Note: must follow execute_filter_output()
+  return 0;
+}
+
+int set_channel_filter(struct channel *chan){
+  // Limit to Nyquist rate
+  float lower = max(chan->filter.min_IF, -(float)chan->output.samprate/2);
+  float upper = min(chan->filter.max_IF, (float)chan->output.samprate/2);
+
+  if(Verbose > 1)
+    fprintf(stdout,"new filter for chan %'u: IF=[%'.0f,%'.0f], samprate %'d, kaiser beta %.1f\n",
+	    chan->output.rtp.ssrc, lower, upper,
+	    chan->output.samprate, chan->filter.kaiser_beta);
+
+  delete_filter_output(&chan->filter2.out);
+  delete_filter_input(&chan->filter2.in);
+  if(chan->filter2.blocking > 0){
+    extern int Overlap;
+    unsigned int const inblock = chan->output.samprate * Blocktime / 1000;
+    unsigned int const outblock = chan->filter2.blocking * inblock;
+    float const binsize = (1000.0f / Blocktime) * ((float)(Overlap - 1) / Overlap);
+    float const margin = 4 * binsize; // 4 bins should be enough even for large Kaiser betas
+
+    // Secondary filter running at 1:1 sample rate, 50% overlap, with blocksize a small multiple (1-4) of the channel block size
+    create_filter_input(&chan->filter2.in,outblock,outblock+1,COMPLEX); // 50% overlap
+    chan->filter2.in.perform_inline = true;
+    create_filter_output(&chan->filter2.out,&chan->filter2.in,NULL,outblock,chan->filter2.isb ? CROSS_CONJ : COMPLEX);
+    chan->filter2.low = lower;
+    chan->filter2.high = upper;
+    chan->filter2.kaiser_beta = chan->filter.kaiser_beta;
+    set_filter(&chan->filter2.out,
+	       lower/chan->output.samprate,
+	       upper/chan->output.samprate,
+	       chan->filter2.kaiser_beta);
+    // Widen the main filter a little to keep its broad skirts from cutting into filter2's response
+    // I.e., the main filter becomes a roofing filter
+    // Again limit to Nyquist rate
+    lower -= margin;
+    lower = max(lower, -(float)chan->output.samprate/2);
+    upper += margin;
+    upper = min(upper, (float)chan->output.samprate/2);
+  }
+  // Set main filter
+  set_filter(&chan->filter.out,
+	     lower/chan->output.samprate,
+	     upper/chan->output.samprate,
+	     chan->filter.kaiser_beta);
+
   return 0;
 }
 

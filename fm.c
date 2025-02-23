@@ -50,6 +50,9 @@ int demod_fm(void *arg){
 	     chan->filter.max_IF/chan->output.samprate,
 	     chan->filter.kaiser_beta);
 
+  chan->filter.remainder = NAN;
+  set_freq(chan,chan->tune.freq); // Retune if necessary to accommodate edge of passband
+
   float phase_memory = 0;
   chan->output.channels = 1; // Only mono for now
   if(isnan(chan->fm.squelch_open) || chan->fm.squelch_open == 0)

@@ -5,7 +5,7 @@
 // Complex input and transfer functions, complex or real output
 // Copyright 2017-2023, Phil Karn, KA9Q, karn@ka9q.net
 
-#define LIQUID 0 // Experimental use of parks-mcclellan in filter generation
+//#define LIQUID 1 // Experimental use of parks-mcclellan in filter generation
 #define _GNU_SOURCE 1
 #include <assert.h>
 #include <stdlib.h>
@@ -34,7 +34,8 @@
 #include "misc.h"
 #include "filter.h"
 
-//#define FILTER_DEBUG 1 # turn on lots of printfs in the window creation code
+
+//#define FILTER_DEBUG 1 // turn on lots of printfs in the window creation code
 
 // Settable from main
 char const *Wisdom_file = "/var/lib/ka9q-radio/wisdom";
@@ -102,27 +103,6 @@ static unsigned long lcm(unsigned long a,unsigned long b);
 // M = impulse response duration
 // in_type = REAL or COMPLEX
 
-// create_filter_output() parameters, distinct per slave
-// master - pointer to associated master (input) filter
-// response = complex frequency response; may be NULL here and set later with set_filter()
-// This is set in the slave and can be different (indeed, this is the reason to have multiple slaves)
-//            NB: response is always complex even when input and/or output is real, though it will be shorter
-//            bins = (L + M - 1)/decimate when output is complex
-//            length = (bins/2+1) when output is real
-//            Must be SIMD-aligned (e.g., allocated with fftw_alloc) and will be freed by delete_filter()
-
-// decimate = input/output sample rate ratio, only tested for powers of 2
-// out_type = REAL, COMPLEX, CROSS_CONJ (COMPLEX with special processing for ISB) or SPECTRUM (real vector of bin energies)
-
-// All demodulators taking baseband (zero IF) I/Q data require COMPLEX input
-// All but SSB require COMPLEX output, with ISB using the special CROSS_CONJ mode
-// SSB(CW) could (and did) use the REAL mode since the imaginary component is unneeded, and the c2r IFFT is faster
-// Baseband FM audio filtering for de-emphasis and PL separation uses REAL input and output
-
-// If you provide your own filter response, ensure that it drops to nil well below the Nyquist rate
-// to prevent aliasing. Remember that decimation reduces the Nyquist rate by the decimation ratio.
-// The set_filter() function uses Kaiser windowing for this purpose
-
 // Set up input (master) half of filter
 int create_filter_input(struct filter_in *master,int const L,int const M, enum filtertype const in_type){
   assert(master != NULL);
@@ -147,6 +127,9 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
 #else
   ASSERT_ZEROED(master,sizeof *master);
 #endif
+
+  // If there are no worker threads, do it inline
+  master->perform_inline = (N_worker_threads == 0);
 
   for(int i=0; i < ND; i++){
     master->fdomain[i] = lmalloc(sizeof(complex float) * bins);
@@ -254,10 +237,39 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
 
   return 0;
 }
-// Set up output (slave) side of filter (possibly one of several sharing the same input master)
-// These output filters should be deleted before their masters
-// Segfault will occur if filter_in is deleted and execute_filter_output is executed
-// Special case: for type == SPECTRUM, 'len' is the number of FFT bins, not the number of output time domain points (since there aren't any)
+/* create an instance of an output filter stage attached to some common master stage
+   Many output filters can share a common input, each with its own frequency shift, response, output sample rate and type
+   But all must operate at the same block rate and with M limited to the time domain overlap in the master
+
+   The number of IFFT frequency points N = L + M - 1; L = length of data, M = length of filter impulse response in time domain
+   In the master, L and M refer to the input sample rate Rm; in the slave they refer to the output rate Rs
+   I.e., Nm / Ns = Rm / Rs = Lm / Ls = (Mm - 1) / (Ms - 1), where M-1 is the filter 'order' (one less than the # of FIR taps)
+
+   master = pointer to associated shared master (input) filter
+   response = complex frequency response; may be NULL here and set later with set_filter()
+     This is set in the slave and can be different (indeed, this is the reason to have multiple slaves)
+     This is always complex, even if the input and/or output are real in the time domain
+     However the length is shorter for real output because the complex spectrum is symmetrical around DC
+     response array length = Ns = Ls + Ms - 1 when output is complex
+                           = Ns/2 + 1 = (Ls + Ms - 1)/2+1 when output is real
+     Must be SIMD-aligned (e.g., allocated with fftw_alloc) and will be freed by delete_filter()
+
+    len = number of time domain points in output = Ls
+    out_type = REAL, COMPLEX, CROSS_CONJ (COMPLEX with special processing for ISB) or SPECTRUM (dummy for spectrum analyzer)
+
+    All demodulators currently require COMPLEX output because a complex exponential is applied to the time domain
+    output for fine frequency tuning
+    Before fine tuning was added, SSB(CW) could (and did) use the REAL mode since the imaginary component is unneeded
+    and the c2r IFFT is faster
+
+    Baseband FM audio filtering for de-emphasis and PL separation can use REAL output because there's no baseband fine tuning
+
+    If you provide your own filter response, ensure that it drops to nil well below the Nyquist rate
+    to prevent aliasing. Remember that decimation reduces the Nyquist rate by the decimation ratio.
+    The set_filter() function uses Kaiser windowing for this purpose
+
+    An output filter must not be used after its master is deleted, a segfault will occur
+*/
 int create_filter_output(struct filter_out *slave,struct filter_in * master,complex float * const response,int len, enum filtertype const out_type){
   assert(master != NULL);
   if(master == NULL)
@@ -267,7 +279,7 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,comp
   if(slave == NULL)
     return -1;
 
-  assert(len > 0);
+  assert(out_type == SPECTRUM || len > 0);
 
   // Should already be zeroed
   // If not, it is probably being reused and the dynamically allocated storage in it may not have been freed
@@ -276,8 +288,6 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,comp
 #else
   ASSERT_ZEROED(slave,sizeof *slave);
 #endif
-
-  memset(slave,0,sizeof *slave);
   // Share all but output fft bins, response, output and output type
   slave->master = master;
   slave->out_type = out_type;
@@ -297,10 +307,13 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,comp
     {
       slave->olen = len;
       ldiv_t x = ldiv((long)len * N,L);
-      if(x.rem != 0){
-	fprintf(stdout,"Invalid filter output length %d for input N=%d, L=%d\n",len,N,L);
+#if 0
+      if((x.quot & 1) || x.rem != 0){
+	// Odd IFFT lengths produce corrupted output for some reason, disallow
+	fprintf(stdout,"Invalid filter output length %d (fft size %ld) for input N=%d, L=%d\n",len,x.quot,N,L);
 	return -1;
       }
+#endif
       slave->points = x.quot; // Total number of FFT points including overlap
       slave->bins = x.quot;
       slave->fdomain = lmalloc(sizeof(complex float) * slave->bins);
@@ -323,14 +336,8 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,comp
     }
     break;
   case SPECTRUM: // Like complex, but no IFFT or output time domain buffer
-    {
-      slave->olen = 0;
-      slave->bins = len;
-      slave->fdomain = lmalloc(sizeof(complex float) * slave->bins); // User reads this directly
-      assert(slave->fdomain != NULL);
-      // Note: No time domain buffer; slave->output, etc, all NULL
-      // Also don't set up an IFFT
-    }
+    // Recent change: spectrum will read directly from master frequency bins
+    // Also don't set up an IFFT
     break;
   case REAL:
     {
@@ -372,7 +379,7 @@ int create_filter_output(struct filter_out *slave,struct filter_in * master,comp
 	int nell = nn * ell / slave->points;
 	int nm = nn - nell + 1;
 	fprintf(stdout,"create_filter_output: N=%d is not an efficient blocksize for FFTW3.",slave->points);
-	fprintf(stdout," Next good choice is N = %d (L=%d, M=%d); set samprate = %d * blockrate\n",nn,nell,nm,ell);
+	fprintf(stdout," Next good choice is N = %d (L=%d, M=%d); set samprate = %d * blockrate\n",nn,nell,nm,nell);
 	break;
       }
     }
@@ -541,13 +548,18 @@ int execute_filter_input(struct filter_in * const f){
   return 0;
 }
 
-// Execute the output side of a filter:
-// 1 - wait for a forward FFT job to complete
-//     frequency domain data is in a circular queue ND buffers deep to tolerate scheduling jitter
-// 2 - multiply the selected frequency bin range by the filter frequency response
-//     This is the hard part; handle all combinations of real/complex input/output, wraparound, etc
-// 3 - convert back to time domain with IFFT
-int execute_filter_output(struct filter_out * const slave,int const rotate){
+/* Execute the output side of a filter:
+   1 - wait for a forward FFT job to complete
+   frequency domain data is in a circular queue ND buffers deep to tolerate scheduling jitter
+
+   2 - multiply the selected frequency bin range by the filter frequency response
+   This is the hard part; handle all combinations of real/complex input/output, wraparound, etc
+
+   3 - convert back to time domain with IFFT
+   'shift' is the number of FFT bins to shift *down*; a positive 'shift' means that a positive input
+   frequency will become zero frequency on output
+*/
+int execute_filter_output(struct filter_out * const slave,int const shift){
   assert(slave != NULL);
   if(slave == NULL)
     return -1;
@@ -559,16 +571,14 @@ int execute_filter_output(struct filter_out * const slave,int const rotate){
   if(master == NULL)
     return -1;
 
-  assert(slave->out_type == SPECTRUM || slave->rev_plan != NULL);
+  assert(slave->out_type == SPECTRUM || (slave->rev_plan != NULL && slave->bins > 0));
   assert(slave->out_type != NONE);
   assert(master->in_type != NONE);
   assert(master->fdomain != NULL);
-  assert(slave->fdomain != NULL);
   assert(master->bins > 0);
-  assert(slave->bins > 0);
 
   // DC and positive frequencies up to nyquist frequency are same for all types
-  assert(malloc_usable_size(slave->fdomain) >= slave->bins * sizeof(*slave->fdomain));
+  assert(slave->out_type == SPECTRUM || malloc_usable_size(slave->fdomain) >= slave->bins * sizeof(*slave->fdomain));
 
   // Wait for new block of output data
   pthread_mutex_lock(&master->filter_mutex);
@@ -591,150 +601,156 @@ int execute_filter_output(struct filter_out * const slave,int const rotate){
   slave->next_jobnum = master->completed_jobs[slave->next_jobnum % ND] + 1;
   pthread_mutex_unlock(&master->filter_mutex);
 
-  assert(fdomain != NULL);
-  if(fdomain == NULL)
-    return -1;
+  assert(fdomain != NULL); // Should always be master frequency data
+  if(slave->fdomain == NULL || slave->response == NULL)
+    return 0; // Spectrum mode; we'll read directly from master
 
-  // Copy the requested frequency segment in preparation for multiplication by the filter response
-  // Although frequency domain data is always complex, this is complicated because
-  // we have to handle the four combinations of the filter input and output time domain data
-  // being either real or complex.
+  /* Multiply the requested frequency segment by the frequency response
+     Although frequency domain data is always complex, this is complicated because
+     we have to handle the four combinations of the filter input and output time domain data
+     being either real or complex.
 
-  // In ka9q-radio the input depends on the SDR front end, while the output is complex
-  // (even for SSB) because of the fine tuning frequency shift after conversion
-  // back to the time domain. So while real output is supported it is not well tested.
-  if(master->in_type != REAL && slave->out_type != REAL){    // Complex -> complex
-    // Rewritten to avoid modulo computations and complex branches inside loops
-    int si = slave->bins/2;
-    int mi = rotate - si;
+     In ka9q-radio the input depends on the SDR front end, while the output is complex
+     (even for SSB) because of the fine tuning frequency shift after conversion
+     back to the time domain. So while real output is supported it is not well tested.
+  */
+  pthread_mutex_lock(&slave->response_mutex); // Don't let it change while we're using it
+  if(master->in_type != REAL && slave->out_type != REAL){
+    // Complex -> complex (e.g., fobos (in VHF/UHF mode), funcube, airspyhf, sdrplay)
 
-    if(mi >= master->bins/2 || mi <= -master->bins/2 - slave->bins){
-      // Completely out of range of master; blank output
-      memset(slave->fdomain,0,slave->bins * sizeof(slave->fdomain[0]));
-      goto copy_done;
+    int wp = (slave->bins+1)/2; // most negative output bin
+    int rp = shift - slave->bins/2; // Start index in master, unwrapped = shift - # output bins
+
+    // Starting below master, zero output until we're in range. Rarely needed.
+    while(rp < -(master->bins+1)/2){
+      assert(wp >=0 && wp < slave->bins);
+      slave->fdomain[wp] = 0;
+      rp++;
+      if(++wp == (slave->bins+1)/2) // exhausted output buffer
+	goto done;
+      if(wp == slave->bins)
+	wp = 0; // Wrap to DC
     }
-    while(mi < -master->bins/2){
-      // Below start of master; zero output
-      mi++;
-      assert(si >= 0 && si < slave->bins);
-      slave->fdomain[si++] = 0;
-      if(si == slave->bins)
-	si = 0; // Wrap to positive output
-      assert(si != slave->bins/2); // Completely blank output should be detected by initial check
+    if(rp < 0)
+      rp += master->bins; // Starts in negative region of master
+
+    if(rp < 0 || rp >= master->bins){
+      // Shift is out of range
+      // Zero any remaining output
+      while(wp != (slave->bins+1)/2){
+	assert(wp >=0 && wp < slave->bins);
+	slave->fdomain[wp++] = 0;
+	if(wp == slave->bins)
+	  wp = 0; // Wrap to DC
+      }
+      goto done;
     }
-    if(mi < 0)
-      mi += master->bins; // start in neg region of master
-    do {    // At least one master bin is in range
-      assert(si >= 0 && si < slave->bins);
-      assert(mi >= 0 && mi < master->bins);
-      slave->fdomain[si++] = fdomain[mi++];
-      if(mi == master->bins)
-	mi = 0; // Not necessary if it starts positive, and master->bins > slave->bins?
-      if(si == slave->bins)
-	si = 0;
-      if(si == slave->bins/2)
-	goto copy_done; // All done
-    } while(mi != master->bins/2); // Until we hit high end of master
-    while(si != slave->bins/2){
-      // Above end of master; zero out remainder
-      slave->fdomain[si++] = 0;
-      if(si == slave->bins)
-	si = 0;
+    // The actual work is here
+    do {
+      assert(rp >= 0 && rp < master->bins);
+      assert(wp >=0 && wp < slave->bins);
+      slave->fdomain[wp] = fdomain[rp] * slave->response[wp];
+      if(++rp == master->bins)
+	rp = 0; // Master wrapped to DC
+      if(++wp == slave->bins)
+	wp = 0; // Slave wrapped to DC
+    } while (wp != (slave->bins+1)/2 && rp != (master->bins+1)/2); // Until we reach the top of the output or input
+
+    // Zero any remaining output. Rarely needed.
+    while(wp != (slave->bins+1)/2){
+      assert(wp >=0 && wp < slave->bins);
+      slave->fdomain[wp++] = 0;
+      if(wp == slave->bins)
+	wp = 0; // Wrap to DC
     }
   } else if(master->in_type != REAL && slave->out_type == REAL){
-    // Complex -> real UNTESTED!
+    // Complex -> real UNTESTED! not used in ka9q-radio at present
     for(int si=0; si < slave->bins; si++){
-      int const mi = si + rotate;
+      int const mi = si + shift;
       complex float result = 0;
       if(mi >= -master->bins/2 && mi < master->bins/2)
-	result = (fdomain[modulo(mi,master->bins)] + conjf(fdomain[modulo(master->bins - mi, master->bins)]));
+	result = slave->response[si] * (fdomain[modulo(mi,master->bins)] + conjf(fdomain[modulo(master->bins - mi, master->bins)]));
       slave->fdomain[si] = result;
     }
   } else if(master->in_type == REAL && slave->out_type == REAL){
-    // Real -> real
-    // rotate is unlikely to be non-zero because of the frequency folding, but handle it anyway
+    // Real -> real (e.g. in wfm stereo decoding)
+    // shift is unlikely to be non-zero because of the frequency folding, but handle it anyway
     for(int si=0; si < slave->bins; si++){ // All positive frequencies
-      int const mi = si + rotate;
-      complex float result = 0;
-      if(mi >= 0 && mi < master->bins)
-	result = fdomain[mi];
-
-      slave->fdomain[si] = result;
+      int const mi = si + shift;
+      slave->fdomain[si] = (mi >= 0 && mi < master->bins) ? fdomain[mi] * slave->response[si] : 0;
     }
   } else if(master->in_type == REAL && slave->out_type != REAL){
-    // Real->complex
-    // This can be tricky. We treat the input as complex with Hermitian symmetry (both positive and negative spectra)
-    // We don't allow the output to span the zero input frequency range as this doesn't seem useful
-    // The most common case is that m is entirely in range and always < 0 or > 0
-    if(rotate >= slave->bins/2 && rotate <= master->bins - slave->bins/2){
-      // Positive input spectrum
-      // Negative half of output
-      int mi = rotate - slave->bins/2;
-      for(int si = slave->bins/2; si < slave->bins; si++)
-	slave->fdomain[si] = fdomain[mi++];
+    /* Real->complex (e.g., rx888, fobos (direct sample mode), airspy R2)
+       This can be tricky. We treat the input as complex with Hermitian symmetry (both positive and negative spectra)
+       If shift >= 0, the input spectrum is positive and right-side up (e.g., rx888, fobos direct sampling)
+       If shift < 0, the input spectrum is negative and inverted (e.g., Airspy R2)
+       Don't cross input DC as this doesn't seem useful; just blank the output
+    */
+    int wp = (slave->bins+1)/2; // most negative output bin
 
-      // Positive half of output
-      for(int si = 0; si < slave->bins/2; si++)
-	slave->fdomain[si] = fdomain[mi++];
-    } else if(-rotate >= slave->bins/2 && -rotate <= master->bins - slave->bins/2){
-      // Negative input spectrum
-      // Negative half of output
-      int mi = -(rotate - slave->bins/2);
-      for(int si = slave->bins/2; si < slave->bins; si++)
-	slave->fdomain[si] = conjf(fdomain[mi--]);
-
-      // Positive half of output
-      for(int si = 0; si < slave->bins/2; si++)
-	slave->fdomain[si] = conjf(fdomain[mi--]);
+    if(shift >= 0){
+      // Right side up
+      int rp = shift - slave->bins/2; // Start index in master, unwrapped = shift - # output bins
+      // Pad start if necessary. Rarely needed
+      while(rp < 0){
+	assert(wp >=0 && wp < slave->bins);
+	slave->fdomain[wp] = 0;
+	if(++wp == (slave->bins+1)/2)
+	  goto done; // Top of output
+	if(wp == slave->bins)
+	  wp = 0; // wrap to DC
+	rp++;
+      }
+      // Actual work
+      while(rp < master->bins){
+	assert(wp >=0 && wp < slave->bins);
+	assert(rp >= 0 && rp < master->bins);
+	slave->fdomain[wp] = fdomain[rp] * slave->response[wp];
+	if(++wp == (slave->bins+1)/2)
+	  goto done;
+	if(wp == slave->bins)
+	  wp = 0; // Wrap to DC
+	rp++;
+      }
     } else {
-      // Some of the bins are out of range
-      int si = slave->bins/2; // Most negative output frequency
-      int mi = -si + rotate;
-
-#if 1 // faster!
-      int i;
-      for(i = 0; -mi >= master->bins && i < slave->bins; i++,mi++){
-	slave->fdomain[si++] = 0;
-	si = (si == slave->bins) ? 0 : si;
+      // Inverted spectrum
+      int rp = -(shift - slave->bins/2); // Start at high (negative) input frequency
+      // Pad start if necessary, rarely needed
+      while(rp >= master->bins){
+	assert(wp >=0 && wp < slave->bins);
+	slave->fdomain[wp] = 0;
+	if(++wp == (slave->bins+1)/2)
+	  goto done; // Top of output
+	if(wp == slave->bins)
+	  wp = 0; // wrap to DC
+	rp--;
       }
-      for(; mi < 0 && i < slave->bins; i++,mi++){
-	// neg freq component is conjugate of corresponding positive freq
-	slave->fdomain[si++] = conjf(fdomain[-mi]);
-	si = (si == slave->bins) ? 0 : si;
+      // Actual work
+      while(rp >= 0){
+	assert(wp >=0 && wp < slave->bins);
+	assert(rp >= 0 && rp < master->bins);
+	slave->fdomain[wp] = conjf(fdomain[rp]) * slave->response[wp];
+	if(++wp == (slave->bins+1)/2)
+	  goto done;
+	if(wp == slave->bins)
+	  wp = 0; // Wrap to DC
+	rp--;
       }
-      for(; mi < master->bins && i < slave->bins; i++,mi++){
-	slave->fdomain[si++] = fdomain[mi];
-	si = (si == slave->bins) ? 0 : si;
-      }
-      for(; i < slave->bins; i++){
-	slave->fdomain[si++] = 0;
-	si = (si == slave->bins) ? 0 : si;
-      }
-#else    // slower
-      for(int i = 0; i < slave->bins; i++,mi++){
-	complex float result = 0;
-	if(abs(mi) < master->bins){
-	  // neg freq component is conjugate of corresponding positive freq
-	  result = (mi >= 0 ?  fdomain[mi] : conjf(fdomain[-mi]));
-	}
-	slave->fdomain[si++] = result;
-	si = (si == slave->bins) ? 0 : si;
-      }
-#endif
+    }
+    // Zero any remaining output. Rarely needed
+    while(wp != (slave->bins+1)/2){
+      assert(wp >=0 && wp < slave->bins);
+      slave->fdomain[wp] = 0;
+      if(++wp == slave->bins)
+	wp = 0; // Wrap DC
     }
   }
- copy_done:;
+ done:;
+  // Zero out Nyquist bin when N even
+  if((slave->bins & 1) == 0)
+    slave->fdomain[slave->bins/2] = 0;
 
-  // Apply channel filter response
-  if(slave->response != NULL){
-    assert(malloc_usable_size(slave->response) >= slave->bins * sizeof(*slave->response));
-    assert(malloc_usable_size(slave->fdomain) >= slave->bins * sizeof(*slave->fdomain));
-
-    pthread_mutex_lock(&slave->response_mutex); // Don't let it change while we're using it
-    for(int i=0; i < slave->bins; i++)
-      slave->fdomain[i] *= slave->response[i];
-    pthread_mutex_unlock(&slave->response_mutex); // release response[]
-  }
+  pthread_mutex_unlock(&slave->response_mutex); // release response[]
 
   if(slave->out_type == CROSS_CONJ){
     // hack for ISB; forces negative frequencies onto I, positive onto Q
@@ -751,9 +767,8 @@ int execute_filter_output(struct filter_out * const slave,int const rotate){
     }
     slave->fdomain[0] = 0; // Must be a null at DC
   }
-  // And finally back to the time domain (except in spectrum mode)
-  if(slave->out_type != SPECTRUM)
-    fftwf_execute(slave->rev_plan); // Note: c2r version destroys fdomain[]
+  // And finally back to the time domain
+  fftwf_execute(slave->rev_plan); // Note: c2r version destroys fdomain[], but it's not used again anyway
   return 0;
 }
 
@@ -830,12 +845,7 @@ static float noise_gain(struct filter_out const * const slave){
   // the factor N compensates for the unity gain scaling
   // Amplitude is pre-scaled 1/N for the concatenated (FFT/IFFT) round trip, so the overall power
   // is scaled 1/N^2. Multiplying by N gives us correct power in the frequency domain (just the FFT)
-
-  // The factor of 2 undoes the 1/sqrt(2) amplitude scaling required for unity signal gain in these two modes
-  if(slave->out_type == REAL || slave->out_type == CROSS_CONJ)
-    return 2 * master->bins * sum;
-  else
-    return master->bins * sum;
+  return master->bins * sum;
 }
 
 
@@ -854,7 +864,7 @@ int set_filter(struct filter_out * const slave,float low,float high,float const 
   int const L = slave->olen;
   int const M = N - L + 1; // Length of impulse response in time domain
 
-  float const gain = (slave->out_type == COMPLEX ? 1.0 : M_SQRT1_2) / (float)slave->master->bins;
+  float const gain = 1.0f / (float)slave->master->bins;
   complex float * const response = lmalloc(sizeof(*response) * N);
   assert(response != NULL);
   float real_coeff[M];
@@ -870,12 +880,16 @@ int set_filter(struct filter_out * const slave,float low,float high,float const 
   bands[1] = bands[1] < 0 ? 0 : bands[1];
   bands[2] = bw/2 + 0.01; bands[3] = 0.5;
   bands[2] = bands[2] > 0.5 ? 0.5 : bands[2];
-  float des[num_bands] = { 1.0, 0.0 };
-  float weights[num_bands] = { 1.0, 1.0 };
-  liquid_firdespm_wtype wtype[num_bands] = {
-    LIQUID_FIRDESPM_FLATWEIGHT,
-    LIQUID_FIRDESPM_EXPWEIGHT,
-  };
+  float des[num_bands];
+  des[0] = 1.0;
+  des[1] = 0.0;
+  float weights[num_bands];
+  weights[0] = 1.0;
+  weights[1] = 1.0;
+  liquid_firdespm_wtype wtype[num_bands];
+  wtype[0] = LIQUID_FIRDESPM_FLATWEIGHT;
+  wtype[1] =  LIQUID_FIRDESPM_EXPWEIGHT;
+
   firdespm_run(M,num_bands,bands,des,weights,wtype,LIQUID_FIRDESPM_BANDPASS,real_coeff);
 #else // liquid kaiser filter gen
   // Create a real filter, we'll shift it later
@@ -1119,7 +1133,7 @@ int set_filter(struct filter_out * const slave,float low,float high,float const 
   int const L = slave->olen;
   int const M = N - L + 1; // Length of impulse response in time domain
 
-  float const gain = (slave->out_type == COMPLEX ? 1.0 : M_SQRT1_2) / (float)slave->master->bins;
+  float const gain = 1.0f / (float)slave->master->bins;
 
   complex float * const response = lmalloc(sizeof(complex float) * slave->bins);
   assert(response != NULL);

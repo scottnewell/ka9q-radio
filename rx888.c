@@ -169,6 +169,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   }
   config_validate_section(stdout,dictionary,section,Rx888_keys,NULL);
   struct sdrstate * const sdr = calloc(1,sizeof(struct sdrstate));
+  assert(sdr != NULL);
   // Cross-link generic and hardware-specific control structures
   sdr->frontend = frontend;
   frontend->context = sdr;
@@ -306,9 +307,8 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   control_send_byte(sdr->dev_handle,I2CWFX3,SI5351_ADDR,SI5351_REGISTER_CLK_BASE+0,clock_control);
   {
     char const *p = config_getstring(dictionary,section,"description","rx888");
-    FREE(frontend->description);
-    frontend->description = strdup(p);
-    fprintf(stdout,"%s: ",frontend->description);
+    if(p != NULL)
+      strlcpy(frontend->description,p,sizeof(frontend->description));
   }
   double ferror = actual - samprate;
   float xfer_time = (float)(sdr->reqsize * sdr->pktsize) / (sizeof(int16_t) * frontend->samprate);
@@ -317,7 +317,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   float const tc  = 1.0; // 1 second
   Power_smooth = -expm1f(-xfer_time/tc);
 
-  fprintf(stdout,"rx888 reference %'.1lf Hz, nominal sample rate %'d Hz, actual %'.3lf Hz (synth err %.3lf Hz; %.3lf ppm), AGC %s, requested gain %.1f dB, actual gain %.1f dB, atten %.1f dB, gain cal %.1f dB, dither %d, randomizer %d, USB queue depth %d, USB request size %'d * pktsize %'d = %'d bytes (%g sec)\n",
+  fprintf(stdout,"rx888 reference %'.1lf Hz, nominal sample rate %'d Hz, actual %'.3lf Hz (synth err %.3lf Hz; %.3lf ppm), AGC %s, nominal gain %.1f dB, actual gain %.1f dB, atten %.1f dB, gain cal %.1f dB, dither %d, randomizer %d, USB queue depth %d, USB request size %'d * pktsize %'d = %'d bytes (%g sec)\n",
 	  sdr->reference,samprate,actual,ferror, 1e6 * ferror / samprate,
 	  frontend->rf_agc ? "on" : "off",
 	  gain,frontend->rf_gain,frontend->rf_atten,frontend->rf_level_cal,
@@ -361,9 +361,7 @@ int rx888_startup(struct frontend * const frontend){
   struct sdrstate * const sdr = (struct sdrstate *)frontend->context;
 
   // Start processing A/D data
-  ASSERT_ZEROED(&sdr->proc_thread, sizeof sdr->proc_thread);
   pthread_create(&sdr->proc_thread,NULL,proc_rx888,sdr);
-  ASSERT_ZEROED(&sdr->agc_thread, sizeof sdr->agc_thread);
   pthread_create(&sdr->agc_thread,NULL,agc_rx888,sdr);
   fprintf(stdout,"rx888 running\n");
   return 0;
@@ -472,8 +470,10 @@ static void *agc_rx888(void *arg){
     }
     if(frontend->rf_agc && (new_dBFS > AGC_upper_limit || new_dBFS < AGC_lower_limit)){
       float const target_level = (AGC_upper_limit + AGC_lower_limit)/2;
-      float const new_gain = frontend->rf_gain - (new_dBFS - target_level);
-      if(new_gain < 34){ // Don't try to go above max gain
+      float new_gain = frontend->rf_gain - (new_dBFS - target_level);
+      if(new_gain > 34)
+	new_gain = 34;
+      if(new_gain != frontend->rf_gain){
 	if(Verbose)
 	  fprintf(stdout,"Front end gain change from %.1f dB to %.1f dB\n",frontend->rf_gain,new_gain);
 	rx888_set_gain(sdr,new_gain,false);
@@ -548,10 +548,7 @@ static void rx_callback(struct libusb_transfer * const transfer){
   write_rfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT if block is complete
 
   // These blocks are kinda small, so exponentially smooth the power readings
-  {
-    frontend->if_power_instant  = (float)in_energy / sampcount;
-    frontend->if_power += Power_smooth * (frontend->if_power_instant - frontend->if_power);
-  }
+  frontend->if_power += Power_smooth * (in_energy / sampcount - frontend->if_power);
   frontend->samples += sampcount; // Count original samples
   if(!Stop_transfers) {
     if(libusb_submit_transfer(transfer) == 0)

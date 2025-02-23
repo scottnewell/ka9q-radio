@@ -69,6 +69,7 @@ void *radio_status(void *arg){
 	if(chan != NULL){
 	  // Channel already exists; queue the command for it to execute
 	  uint8_t *cmd = malloc(length-1);
+	  assert(cmd != NULL);
 	  memcpy(cmd,buffer+1,length-1);
 	  pthread_mutex_lock(&chan->status.lock);
 	  bool oops = false;
@@ -119,6 +120,9 @@ int reset_radio_status(struct channel *chan){
   chan->output.energy = 0;
   chan->output.sum_gain_sq = 0;
   chan->status.blocks_since_poll = 0;
+  if(chan->spectrum.bin_data != NULL && chan->spectrum.bin_count != 0)
+    memset(chan->spectrum.bin_data,0,chan->spectrum.bin_count * sizeof(*chan->spectrum.bin_data));
+
   return 0;
 }
 
@@ -126,7 +130,6 @@ int reset_radio_status(struct channel *chan){
 bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length){
   bool restart_needed = false;
   bool new_filter_needed = false;
-  bool new_filter2_needed = false;
   uint32_t const ssrc = chan->output.rtp.ssrc;
 
   if(chan->lifetime != 0)
@@ -292,7 +295,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	bool i = decode_bool(cp,optlen); // will reimplement someday
 	if(i != chan->filter2.isb){
 	  chan->filter2.isb = i;
-	  new_filter2_needed = true;
+	  new_filter_needed = true;
 	}
       }
       break;
@@ -358,10 +361,16 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     case OUTPUT_CHANNELS: // int
       {
 	unsigned int const i = decode_int(cp,optlen);
-	if(i != chan->output.channels && (i == 1 || i == 2)){
-	  flush_output(chan,false,true); // Flush to Ethernet before we change this
-	  chan->output.channels = i;
-	  chan->output.rtp.type = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding);
+	if(i != 1 && i != 2)
+	  break; // invalid
+
+	if(chan->demod_type == WFM_DEMOD){
+	  // Requesting 2 channels enables FM stereo; requesting 1 disables FM stereo
+	  chan->fm.stereo_enable = (i == 2); // note boolean assignment
+	} else if(i != chan->output.channels){
+	    flush_output(chan,false,true); // Flush to Ethernet before we change this
+	    chan->output.channels = i;
+	    chan->output.rtp.type = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding);
 	}
       }
       break;
@@ -386,7 +395,6 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	  if(Verbose > 1)
 	    fprintf(stdout,"bin bw %f -> %f\n",chan->spectrum.bin_bw,x);
 	  chan->spectrum.bin_bw = x;
-	  restart_needed = true;
 	}
       }
       break;
@@ -397,7 +405,6 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	  if(Verbose > 1)
 	    fprintf(stdout,"bin count %d -> %d\n",chan->spectrum.bin_count,x);
 	  chan->spectrum.bin_count = x;
-	  restart_needed = true;
 	}
       }
       break;
@@ -466,7 +473,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	unsigned int i = decode_int(cp,optlen);
 	if(i <= 4 && i != chan->filter2.blocking){
 	  chan->filter2.blocking = i;
-	  new_filter2_needed = true;
+	  new_filter_needed = true;
 	}
       }
       break;
@@ -484,45 +491,11 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       fprintf(stdout,"restarting thread for ssrc %u\n",ssrc);
     return true;
   }
-  if(new_filter2_needed){
-    unsigned int const inblock = chan->output.samprate * Blocktime / 1000;
-    unsigned int outblock = chan->filter2.blocking * inblock;
-
-    delete_filter_input(&chan->filter2.in);
-    delete_filter_output(&chan->filter2.out);
-    if(chan->filter2.blocking > 0){
-      create_filter_input(&chan->filter2.in,outblock,outblock+1,COMPLEX); // 50% overlap
-      chan->filter2.in.perform_inline = true;
-      create_filter_output(&chan->filter2.out,&chan->filter2.in,NULL,outblock,chan->filter2.isb ? CROSS_CONJ : COMPLEX);
-      chan->filter2.low = chan->filter.min_IF;
-      chan->filter2.high = chan->filter.max_IF;
-      chan->filter2.kaiser_beta = chan->filter.kaiser_beta;
-      set_filter(&chan->filter2.out,chan->filter2.low/chan->output.samprate,
-		 chan->filter2.high/chan->output.samprate,
-		 chan->filter2.kaiser_beta);
-    }
-  }
-
   if(new_filter_needed){
-    // Set up new filter with chan possibly stopped
-    if(Verbose > 1)
-      fprintf(stdout,"new filter for chan %'u: IF=[%'.0f,%'.0f], samprate %'d, kaiser beta %.1f\n",
-	      ssrc, chan->filter.min_IF, chan->filter.max_IF,
-	      chan->output.samprate, chan->filter.kaiser_beta);
-    // start_demod already sets up a new filter
-    set_filter(&chan->filter.out,chan->filter.min_IF/chan->output.samprate,
-	       chan->filter.max_IF/chan->output.samprate,
-	       chan->filter.kaiser_beta);
-
-    if(chan->filter2.blocking > 0){
-      // Reset filter2 too, if it's on
-      chan->filter2.low = chan->filter.min_IF;
-      chan->filter2.high = chan->filter.max_IF;
-      chan->filter2.kaiser_beta = chan->filter.kaiser_beta;
-      set_filter(&chan->filter2.out,chan->filter2.low/chan->output.samprate,
-		 chan->filter2.high/chan->output.samprate,
-		 chan->filter2.kaiser_beta);
-    }
+    set_channel_filter(chan);
+    // Retune if necessary to accommodate edge of passband
+    // but only if a change was commanded, to prevent a tuning war
+    set_freq(chan,chan->tune.freq);
   }
   return false;
 }
@@ -605,9 +578,9 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
     encode_double(&bp,SHIFT_FREQUENCY,chan->tune.shift); // Hz
     encode_byte(&bp,AGC_ENABLE,chan->linear.agc); // bool
     if(chan->linear.agc){
-      encode_float(&bp,AGC_HANGTIME,chan->linear.hangtime*(.001 * Blocktime)); // samples -> sec
+      encode_float(&bp,AGC_HANGTIME,chan->linear.hangtime*(.001f * Blocktime)); // samples -> sec
       encode_float(&bp,AGC_THRESHOLD,voltage2dB(chan->linear.threshold)); // amplitude -> dB
-      encode_float(&bp,AGC_RECOVERY_RATE,voltage2dB(chan->linear.recovery_rate)/(.001*Blocktime)); // amplitude/block -> dB/sec
+      encode_float(&bp,AGC_RECOVERY_RATE,voltage2dB(chan->linear.recovery_rate)/(.001f*Blocktime)); // amplitude/block -> dB/sec
     }
     encode_byte(&bp,INDEPENDENT_SIDEBAND,chan->filter2.isb);
     break;
@@ -616,7 +589,14 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
       encode_float(&bp,PL_TONE,chan->fm.tone_freq);
       encode_float(&bp,PL_DEVIATION,chan->fm.tone_deviation);
     }
-    __attribute__((fallthrough));
+    encode_float(&bp,FREQ_OFFSET,chan->sig.foffset);     // Hz; used differently in linear and fm
+    encode_float(&bp,SQUELCH_OPEN,power2dB(chan->fm.squelch_open));
+    encode_float(&bp,SQUELCH_CLOSE,power2dB(chan->fm.squelch_close));
+    encode_byte(&bp,THRESH_EXTEND,chan->fm.threshold);
+    encode_float(&bp,PEAK_DEVIATION,chan->fm.pdeviation); // Hz
+    encode_float(&bp,DEEMPH_TC,-1.0f/(log1pf(-chan->fm.rate) * chan->output.samprate)); // ad-hoc
+    encode_float(&bp,DEEMPH_GAIN,voltage2dB(chan->fm.gain));
+    break;
   case WFM_DEMOD:  // Note fall-through from FM_DEMOD
     // Relevant only when squelches are active
     encode_float(&bp,FREQ_OFFSET,chan->sig.foffset);     // Hz; used differently in linear and fm
@@ -624,7 +604,7 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
     encode_float(&bp,SQUELCH_CLOSE,power2dB(chan->fm.squelch_close));
     encode_byte(&bp,THRESH_EXTEND,chan->fm.threshold);
     encode_float(&bp,PEAK_DEVIATION,chan->fm.pdeviation); // Hz
-    encode_float(&bp,DEEMPH_TC,-1.0/(logf(chan->fm.rate) * chan->output.samprate));
+    encode_float(&bp,DEEMPH_TC,-1.0f/(log1pf(-chan->fm.rate) * 48000.0f)); // ad-hoc
     encode_float(&bp,DEEMPH_GAIN,voltage2dB(chan->fm.gain));
     break;
   case SPECT_DEMOD:
@@ -640,7 +620,6 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
 	  chan->spectrum.bin_data[i] *= scale;
 
 	encode_vector(&bp,BIN_DATA,chan->spectrum.bin_data,chan->spectrum.bin_count);
-	memset(chan->spectrum.bin_data,0,chan->spectrum.bin_count * sizeof(*chan->spectrum.bin_data));
       }
     }
     break;

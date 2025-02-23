@@ -91,6 +91,7 @@ char const *Global_keys[] = {
   "presets-file",
   "wisdom-file",
   "hardware",
+  "static",
   "status",
   "preset",
   "mode",
@@ -226,7 +227,6 @@ int main(int argc,char *argv[]){
   }
 
   // Graceful signal catch
-  signal(SIGPIPE,closedown);
   signal(SIGINT,closedown);
   signal(SIGKILL,closedown);
   signal(SIGQUIT,closedown);
@@ -251,6 +251,9 @@ int main(int argc,char *argv[]){
     exit(EX_NOINPUT);
   }
   fprintf(stdout,"%d total demodulators started\n",n);
+  if(Ctl_fd == -1 && n == 0){
+    fprintf(stdout,"Warning: no control channel and no static demodulators, radiod won't do anything\n");
+  }
 
   // Measure CPU usage
   int sleep_period = 60;
@@ -395,6 +398,7 @@ static int loadconfig(char const *file){
   IP_tos = config_getint(Configtable,GLOBAL,"tos",IP_tos);
   Mcast_ttl = config_getint(Configtable,GLOBAL,"ttl",Mcast_ttl);
   Global_use_dns = config_getboolean(Configtable,GLOBAL,"dns",false);
+  Static_avahi = config_getboolean(Configtable,GLOBAL,"static",false);
   {
     char const *p = config_getstring(Configtable,GLOBAL,"wisdom-file",NULL);
     if(p != NULL)
@@ -451,6 +455,9 @@ static int loadconfig(char const *file){
       exit(EX_USAGE);
     }
   }
+  if(strlen(Frontend.description) == 0)
+    strlcpy(Frontend.description,Name,sizeof(Frontend.description)); // Set default description
+
   // Default multicast interface
   {
     // The area pointed to by returns from config_getstring() is freed and overwritten when the config dictionary is closed
@@ -497,7 +504,7 @@ static int loadconfig(char const *file){
       addr = make_maddr(Data);
 
     size_t slen = sizeof(Template.output.dest_socket);
-    avahi_start(Frontend.description != NULL ? Frontend.description : Name,
+    avahi_start(Frontend.description,
 	      "_rtp._udp",
 	      DEFAULT_RTP_PORT,
 	      Data,
@@ -531,7 +538,7 @@ static int loadconfig(char const *file){
 
     // If dns name already exists in the DNS, advertise the service record but not an address record
     size_t slen = sizeof(Metadata_dest_socket);
-    avahi_start(Frontend.description != NULL ? Frontend.description : Name,"_ka9q-ctl._udp",DEFAULT_STAT_PORT,
+    avahi_start(Frontend.description,"_ka9q-ctl._udp",DEFAULT_STAT_PORT,
 		Metadata_dest_string,addr,Ttlmsg,
 		addr != 0 ? &Metadata_dest_socket : NULL,
 		addr != 0 ? &slen : NULL);
@@ -541,17 +548,16 @@ static int loadconfig(char const *file){
   // Same remote socket as status
   Ctl_fd = listen_mcast(&Metadata_dest_socket,Iface);
   if(Ctl_fd < 0){
-    fprintf(stdout,"can't listen for commands from %s: %s\n",Metadata_dest_string,strerror(errno));
-    exit(EX_NOHOST);
+    fprintf(stdout,"can't listen for commands from %s: %s; no control channel is set\n",Metadata_dest_string,strerror(errno));
+  } else {
+    if(Ctl_fd >= 3)
+      pthread_create(&Status_thread,NULL,radio_status,NULL);
   }
-  ASSERT_ZEROED(&Status_thread,sizeof Status_thread);
-  if(Ctl_fd >= 3)
-    pthread_create(&Status_thread,NULL,radio_status,NULL);
 
   // Process individual demodulator sections in parallel for speed
   int const nsect = iniparser_getnsec(Configtable);
   pthread_t startup_threads[nsect];
-  memset(startup_threads,0,sizeof startup_threads); // Apparently necessary to prevent segfaults on pthread_join()
+  int nthreads = 0;
   for(int sect = 0; sect < nsect; sect++){
     char const * const sname = iniparser_getsecname(Configtable,sect);
 
@@ -564,11 +570,10 @@ static int loadconfig(char const *file){
     if(config_getboolean(Configtable,sname,"disable",false))
       continue; // section is disabled
 
-    ASSERT_ZEROED(&startup_threads[sect],sizeof startup_threads[sect]);
-    pthread_create(&startup_threads[sect],NULL,process_section,(void *)sname);
+    pthread_create(&startup_threads[nthreads++],NULL,process_section,(void *)sname);
   }
   // Wait for them all to start
-  for(int sect = 0; sect < nsect; sect++){
+  for(int sect = 0; sect < nthreads; sect++){
     pthread_join(startup_threads[sect],NULL);
 #if 0
     printf("startup thread %s joined\n",iniparser_getsecname(Configtable,sect));
@@ -722,7 +727,6 @@ void *process_section(void *p){
 	char sap_dest[] = "224.2.127.254:9875"; // sap.mcast.net
 	resolve_mcast(sap_dest,&chan->sap.dest_socket,0,NULL,0,0);
 	join_group(Output_fd,&chan->sap.dest_socket,iface);
-	ASSERT_ZEROED(&chan->sap.thread,sizeof chan->sap.thread);
 	pthread_create(&chan->sap.thread,NULL,sap_send,chan);
       }
       // RTCP Real Time Control Protocol daemon is optional
@@ -744,7 +748,6 @@ void *process_section(void *p){
 	  }
 	  break;
 	}
-	ASSERT_ZEROED(&chan->rtcp.thread,sizeof chan->rtcp.thread);
 	pthread_create(&chan->rtcp.thread,NULL,rtcp_send,chan);
       }
     }
@@ -763,7 +766,7 @@ static int setup_hardware(char const *sname){
   char const *device = config_getstring(Configtable,sname,"device",sname);
   // Do we support it?
   // This should go into a table somewhere
-#ifndef FORCE_DYNAMIC
+#ifdef STATIC
   if(strcasecmp(device,"rx888") == 0){
     Frontend.setup = rx888_setup;
     Frontend.start = rx888_startup;
@@ -960,14 +963,13 @@ static void *rtcp_send(void *arg){
   }
 }
 static void closedown(int a){
-  fprintf(stdout,"Received signal %d, exiting\n",a);
+  char message[] = "Received signal, shutting down\n";
+
+  int r = write(1,message,strlen(message));
+  (void)r; // shut up compiler
   Stop_transfers = true;
   sleep(1); // pause for threads to see it
-
-  if(a == SIGTERM)
-    exit(EX_OK); // Return success when terminated by systemd
-  else
-    exit(EX_SOFTWARE);
+  _exit(a == SIGTERM ? EX_OK : EX_SOFTWARE); // Success when terminated by systemd
 }
 
 // Increase or decrease logging level (thanks AI6VN for idea)
@@ -978,6 +980,4 @@ static void verbosity(int a){
     Verbose = (Verbose <= 0) ? 0 : Verbose - 1;
   else
     return;
-
-  fprintf(stdout,"Verbose = %d\n",Verbose);
 }

@@ -61,7 +61,7 @@ struct frontend {
   int L;            // Block length of input filter
 
   // Stuff maintained by our upstream source and filled in by the status daemon
-  char *description;  // free-form text, must be unique per radiod instance
+  char description[128];  // free-form text, must be unique per radiod instance
   int samprate;      // Nominal (requested) sample rate on raw input data stream, needs to be integer for filter stuff
   int64_t timestamp; // Nanoseconds since GPS epoch 6 Jan 1980 00:00:00 UTC
   double frequency;
@@ -97,7 +97,6 @@ struct frontend {
       so full A/D range now corresponds to different levels internally, and are scaled
       in radio_status.c when sending status messages
   */
-  float if_power_instant; // instantaneous receive power
   float if_power;   // Exponentially smoothed power measurement in A/D units (not normalized)
   float if_power_max;
 
@@ -211,6 +210,7 @@ struct channel {
     float rate;              // de-emphasis filter coefficient computed from expf(-1.0 / (tc * output.samprate));
                              // tc = 75e-6 sec for North American FM broadcasting
                              // tc = 1 / (2 * M_PI * 300.) = 530.5e-6 sec for NBFM (300 Hz corner freq)
+    bool stereo_enable;      // wfm only
   } fm;
 
   // Used by spectrum analysis only
@@ -247,6 +247,7 @@ struct channel {
     OpusEncoder *opus;
     unsigned int opus_channels;
     unsigned int opus_bitrate;
+    int opus_bandwidth;
     float *queue; // Mirrored ring buffer
     size_t queue_size; // Size of allocation, in floats
     unsigned wp,rp; // Queue write and read indices
@@ -312,6 +313,7 @@ double set_first_LO(struct channel const * restrict, double);
 // Routines common to the internals of all channel demods
 int compute_tuning(int N, int M, int samprate,int *shift,double *remainder, double freq);
 int downconvert(struct channel *chan);
+int set_channel_filter(struct channel *chan);
 
 // extract front end scaling factors (depends on width of A/D sample)
 float scale_voltage_out2FS(struct frontend *frontend);

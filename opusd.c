@@ -1,3 +1,4 @@
+// Mostly obsolete now that radiod can generate opus directly, but probably should be updated
 // Note! Doesn't really work right with consumer progs that get metadata from status beacons on data stream
 // Should modify, not just copy, metadata to indicate transcoding to Opus
 
@@ -301,6 +302,7 @@ int main(int argc,char * const argv[]){
       // Need a new packet buffer?
       if(!pkt)
 	pkt = malloc(sizeof(*pkt));
+      assert(pkt != NULL);
       // Zero these out to catch any uninitialized derefs
       pkt->next = NULL;
       pkt->data = NULL;
@@ -354,7 +356,6 @@ int main(int argc,char * const argv[]){
 	sp->channels = channels;
 
 	// Span per-SSRC thread, each with its own instance of opus encoder
-	ASSERT_ZEROED(&sp->thread,sizeof sp->thread);
 	if(pthread_create(&sp->thread,NULL,encode,sp) == -1){
 	  perror("pthread_create");
 	  close_session(&sp);
@@ -606,7 +607,7 @@ void closedown(int s){
 #endif
 
   pthread_mutex_destroy(&Session_protect);
-  exit(EX_OK);
+  _exit(EX_OK);
 }
 // Encode and send one or more Opus frames when we have enough
 int send_samples(struct session * const sp){
