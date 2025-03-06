@@ -95,10 +95,10 @@ int main(int argc,char *argv[]){
       break;
     case 'S':
       {
-	char *ptr;
-	uint32_t x = strtol(optarg,&ptr,0);
-	if(ptr != optarg)
-	  Ssrc = x;
+        char *ptr;
+        uint32_t x = strtol(optarg,&ptr,0);
+        if(ptr != optarg)
+          Ssrc = x;
       }
       break;
     case 'v':
@@ -227,6 +227,47 @@ static void closedown(int a){
   exit(EX_OK);  // Will call cleanup()
 }
 
+void adc_rate_report(struct frontend *f){
+   static time_t last_update;
+   static uint64_t start_samples;
+   static int64_t start_timestamp;
+   static uint64_t last_samples;
+   static int64_t last_timestamp;
+
+   if (0 == start_timestamp)
+      start_timestamp = f->timestamp;
+   if (0 == start_samples)
+      start_samples = f->samples;
+
+   time_t t = time(0);
+   if ((t - last_update) >= 60) {
+      // once/minute
+      if (f->samples < last_samples){
+         wd_log(0,"ADC sample count decreased...maybe radiod restarted?\n");
+         start_samples = f->samples;
+         start_timestamp = f->timestamp;
+      }
+      double freq_60s = ((double)(f->samples - last_samples) / ((double)(f->timestamp - last_timestamp) * 1.0e-9));
+      double ppb_60s = ((freq_60s - f->samprate) / f->samprate) * 1.0e9;
+      double freq = ((double)(f->samples - start_samples) / ((double)(f->timestamp - start_timestamp) * 1.0e-9));
+      double ppb = ((freq - f->samprate) / f->samprate) * 1.0e9;
+
+      if (last_update){
+         wd_log(0," samples: %lu ns: %ld rate: %d Hz (60 seconds: %.3f Hz, %+.6f PPB) (all: %.3f Hz, %+.6f PPB)\n",
+                f->samples,
+                f->timestamp,
+                f->samprate,
+                freq_60s,
+                ppb_60s,
+                freq,
+                ppb);
+      }
+      last_samples = f->samples;
+      last_timestamp = f->timestamp;
+      last_update = t;
+   }
+}
+
 // Read both data and status from RTP network socket, assemble blocks of samples
 // Doing both in one thread avoids a lot of synchronization problems with the session structure, since both write it
 static void input_loop(){
@@ -249,11 +290,11 @@ static void input_loop(){
       socklen_t socksize = sizeof(sender);
       int length = recvfrom(Status_fd,buffer,sizeof(buffer),0,&sender,&socksize);
       if(length <= 0){    // ??
-	perror("recvfrom");
-	goto statdone; // Some sort of error
+        perror("recvfrom");
+        goto statdone; // Some sort of error
       }
       if(buffer[0] != STATUS)
-	goto statdone;
+        goto statdone;
       // Extract just the SSRC to see if the session exists
       // NB! Assumes same IP source address *and UDP source port* for status and data
       // This is only true for recent versions of radiod, after the switch to unconnected output sockets
@@ -263,40 +304,41 @@ static void input_loop(){
       struct frontend frontend;
       memset(&frontend,0,sizeof(frontend));
       decode_radio_status(&frontend,&chan,buffer+1,length-1);
+      adc_rate_report(&frontend);
 
       if(Ssrc != 0 && chan.output.rtp.ssrc != Ssrc)
-	goto statdone; // Unwanted session, but still clear any data packets
+        goto statdone; // Unwanted session, but still clear any data packets
 
       // Look for existing session
       // Everything must match, or we create a different session & file
       struct session *sp;
       for(sp = Sessions;sp != NULL;sp=sp->next){
-	if(sp->ssrc == chan.output.rtp.ssrc
-	   && sp->type == chan.output.rtp.type
-	   && address_match(&sp->sender,&sender)
-	   && getportnumber(&sp->sender) == getportnumber(&sender))
-	  break;
+        if(sp->ssrc == chan.output.rtp.ssrc
+           && sp->type == chan.output.rtp.type
+           && address_match(&sp->sender,&sender)
+           && getportnumber(&sp->sender) == getportnumber(&sender))
+          break;
       }
       if(sp != NULL && sp->prev != NULL){
-	// Move to top of list to speed later lookups
-	sp->prev->next = sp->next;
-	if(sp->next != NULL)
-	  sp->next->prev = sp->prev;
-	sp->next = Sessions;
-	sp->prev = NULL;
-	Sessions = sp;
+        // Move to top of list to speed later lookups
+        sp->prev->next = sp->next;
+        if(sp->next != NULL)
+          sp->next->prev = sp->prev;
+        sp->next = Sessions;
+        sp->prev = NULL;
+        Sessions = sp;
       }
       if(sp == NULL){
-	// Create session and initialize
-	sp = calloc(1,sizeof(*sp));
-	if(sp == NULL)
-	  goto statdone; // unlikely
+        // Create session and initialize
+        sp = calloc(1,sizeof(*sp));
+        if(sp == NULL)
+          goto statdone; // unlikely
 
-	sp->prev = NULL;
-	sp->next = Sessions;
-	if(sp->next)
-	  sp->next->prev = sp;
-	Sessions = sp;
+        sp->prev = NULL;
+        sp->next = Sessions;
+        if(sp->next)
+          sp->next->prev = sp;
+        Sessions = sp;
       }
       // Wav can't change channels or samprate mid-stream, so if they're going to change we
       // should probably add an option to force stereo and/or some higher sample rate.
@@ -316,51 +358,51 @@ static void input_loop(){
       socklen_t socksize = sizeof(sender);
       int size = recvfrom(Input_fd,buffer,sizeof(buffer),0,&sender,&socksize);
       if(size <= 0){    // ??
-	perror("recvfrom");
-	goto datadone; // Some sort of error, quit
+        perror("recvfrom");
+        goto datadone; // Some sort of error, quit
       }
       if(size < RTP_MIN_SIZE)
-	goto datadone; // Too small for RTP, ignore
+        goto datadone; // Too small for RTP, ignore
 
       struct rtp_header rtp;
       uint8_t *dp = (uint8_t *)ntoh_rtp(&rtp,buffer);
       if(rtp.pad){
-	// Remove padding
-	size -= dp[size-1];
-	rtp.pad = 0;
+        // Remove padding
+        size -= dp[size-1];
+        rtp.pad = 0;
       }
       if(size <= 0)
-	goto datadone; // Bogus RTP header
+        goto datadone; // Bogus RTP header
 
       size -= (dp - buffer);
 
       if(Ssrc != 0 && rtp.ssrc != Ssrc)
-	goto datadone;
+        goto datadone;
 
       // Sessions are defined by the tuple {ssrc, payload type, sending IP address, sending UDP port}
       struct session *sp;
       for(sp = Sessions;sp != NULL;sp=sp->next){
-	if(sp->ssrc == rtp.ssrc
-	   && sp->type == rtp.type
-	   && address_match(&sp->sender,&sender)
-	   && getportnumber(&sp->sender) == getportnumber(&sender))
-	  break;
+        if(sp->ssrc == rtp.ssrc
+           && sp->type == rtp.type
+           && address_match(&sp->sender,&sender)
+           && getportnumber(&sp->sender) == getportnumber(&sender))
+          break;
       }
       // If a matching session is not found, drop packet and wait for first status packet to create it
       // This is a change from previous behavior without status when the first RTP packet would create it
       // This is the only way to work with dynamic payload types since we need the status info
       // We can't even process RTP timestamps without knowing how big a frame is
       if(sp == NULL)
-	goto datadone;
+        goto datadone;
 
       if(sp->prev != NULL){
-	// Move to top of list to speed later lookups
-	sp->prev->next = sp->next;
-	if(sp->next != NULL)
-	  sp->next->prev = sp->prev;
-	sp->next = Sessions;
-	sp->prev = NULL;
-	Sessions = sp;
+        // Move to top of list to speed later lookups
+        sp->prev->next = sp->next;
+        if(sp->next != NULL)
+          sp->next->prev = sp->prev;
+        sp->next = Sessions;
+        sp->prev = NULL;
+        Sessions = sp;
       }
 
       sp->rtp_state.seq = rtp.seq;
