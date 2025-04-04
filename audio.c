@@ -286,6 +286,16 @@ int flush_output(struct channel * chan,bool marker,bool complete){
 
   int available_frames = available_samples / chan->output.channels;
   int frames_sent = 0;
+
+  // n5tnl: borrow CSRC to pass along diag info to the RTP stream
+  struct rtp_timing r;
+  r.usb_transfer_ns = chan->filter.out.usb_timestamp;
+  r.usb_sampcount = chan->filter.out.usb_sampcount;
+  r.fft_ns = chan->filter.out.fft_timestamp;
+  r.fft_jobnum = chan->filter.out.next_jobnum;
+  memcpy(rtp.csrc,&r,sizeof(r));
+  rtp.cc = sizeof(r) / sizeof(rtp.csrc[0]);
+
   while(available_frames >= min_frames_per_pkt){
     unsigned int chunk = min(max_frames_per_pkt,available_frames);
     rtp.timestamp = chan->output.rtp.timestamp;

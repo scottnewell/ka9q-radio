@@ -64,6 +64,13 @@ struct fft_job {
   pthread_cond_t *completion_cond;   // Signaled when job is complete
   unsigned int *completion_jobnum;   // Written with jobnum when complete
   bool terminate; // set to tell fft thread to quit
+
+  long long *completion_fft_ns;         // n5tnl: FFT start timestamps
+  long long *completion_usb_ns;         // approx timestamps of first USB transfer/FFT
+  uint64_t *completion_usb_samples;     // approx ADC samples of first USB transfer/FFT
+  long long fft_ns;                     // timestamp of start of this FFT
+  long long usb_timestamp;              // approx timestamp of first USB transfer this FFT
+  uint64_t usb_sampcount;               // approx ADC sample of first USB transfer this FFT
 };
 
 static struct fft_job *FFT_free_list; // List of spare job descriptors
@@ -397,6 +404,8 @@ void *run_fft(void *p){
     FFT.job_queue = job->next;
     pthread_mutex_unlock(&FFT.queue_mutex);
 
+    job->fft_ns = gps_time_ns();        // n5tnl: Why GPS time? Would UTC be easier to deal with?
+
     if(job->input != NULL && job->output != NULL && job->plan != NULL){
       switch(job->type){
       case COMPLEX:
@@ -415,6 +424,15 @@ void *run_fft(void *p){
       pthread_mutex_lock(job->completion_mutex);
     if(job->completion_jobnum)
       *job->completion_jobnum = job->jobnum;
+
+    // n5tnl: transfer timestamps/sample counts on down the line
+    if(job->completion_fft_ns)
+      *job->completion_fft_ns = job->fft_ns;
+    if (job->completion_usb_samples)
+      *job->completion_usb_samples = job->usb_sampcount;
+    if (job->completion_usb_ns)
+      *job->completion_usb_ns = job->usb_timestamp;
+
     if(job->completion_cond)
       pthread_cond_broadcast(job->completion_cond);
     if(job->completion_mutex)
@@ -446,6 +464,7 @@ int execute_filter_input(struct filter_in * const f){
     // Just execute it here
     int jobnum = f->next_jobnum++;
     complex float *output = f->fdomain[jobnum % ND];
+    long long fft_ns = gps_time_ns();
     switch(f->in_type){
     default:
     case CROSS_CONJ:
@@ -471,6 +490,10 @@ int execute_filter_input(struct filter_in * const f){
     f->completed_jobs[jobnum % ND] = jobnum;
     pthread_cond_broadcast(&f->filter_cond);
     pthread_mutex_unlock(&f->filter_mutex);
+    // n5tnl: transfer timestamps/sample counts
+    f->fft_ns[jobnum % ND] = fft_ns;
+    f->usb_ns[jobnum % ND] = f->usb_timestamp;
+    f->usb_samples[jobnum % ND] = f->usb_sampcount;
     return 0;
   }
 
@@ -497,6 +520,13 @@ int execute_filter_input(struct filter_in * const f){
   job->completion_jobnum = &f->completed_jobs[job->jobnum % ND];
   job->completion_cond = &f->filter_cond;
   job->terminate = false;
+
+  // n5tnl: pass along the timestamp/samples so the FFT threads can update on completion
+  job->completion_fft_ns = &f->fft_ns[job->jobnum % ND];
+  job->completion_usb_samples = &f->usb_samples[job->jobnum % ND];
+  job->completion_usb_ns = &f->usb_ns[job->jobnum % ND];
+  job->usb_timestamp = f->usb_timestamp;
+  job->usb_sampcount = f->usb_sampcount;
 
   // Set up the job and next input buffer
   // We're assuming that the time-domain pointers we're passing to the FFT are always aligned the same
@@ -587,6 +617,12 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
   // We don't modify the master's output data, we create our own
   complex float const * const fdomain = master->fdomain[slave->next_jobnum % ND];
   // in case we just waited so long that the buffer wrapped, resynch
+
+  // n5tnl: pass along timestamps/sample counts
+  slave->fft_timestamp = master->fft_ns[slave->next_jobnum % ND];
+  slave->usb_timestamp = master->usb_ns[slave->next_jobnum % ND];
+  slave->usb_sampcount = master->usb_samples[slave->next_jobnum % ND];
+
   slave->next_jobnum = master->completed_jobs[slave->next_jobnum % ND] + 1;
   pthread_mutex_unlock(&master->filter_mutex);
 

@@ -57,6 +57,13 @@ struct filter_in {
   unsigned int next_jobnum;
   unsigned int completed_jobs[ND];
   bool perform_inline;       // Perform FFT inline, don't use worker threads (better for small FFTs)
+
+  long long fft_ns[ND];         // n5tnl: FFT start timestamps
+  long long usb_ns[ND];         // approx timestamp of first USB transfer in each block
+  uint64_t usb_samples[ND];     // approx ADC sample count at start of each block
+  long long fft_timestamp;      // current FFT start timestamp
+  long long usb_timestamp;      // approx timestamp of first USB transfer of current block
+  uint64_t usb_sampcount;       // approx first ADC sample count of current block
 };
 
 struct filter_out {
@@ -75,6 +82,10 @@ struct filter_out {
   float noise_gain;                  // Filter gain on uniform noise (ratio < 1)
   unsigned block_drops;          // Lost frequency domain blocks, e.g., from late scheduling of slave thread
   int rcnt;                 // Samples read from output buffer
+
+  long long fft_timestamp;      // n5tnl: current FFT start timestamp
+  long long usb_timestamp;      // approx timestamp of first USB transfer of current block
+  uint64_t usb_sampcount;       // approx first ADC sample count of current block
 };
 
 int create_filter_input(struct filter_in *,int const L,int const M, enum filtertype const in_type);

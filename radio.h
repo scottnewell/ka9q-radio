@@ -112,6 +112,13 @@ struct frontend {
   float (*gain)(struct frontend *,float);
   float (*atten)(struct frontend *,float);
   struct filter_in in; // Input half of fast convolver, shared with all channels
+
+  // n5tnl: used to track the time and sample count from USB transfer to
+  // the start of each FFT. Currently these are approximate. They are
+  // wrong, because I don't know how to deal with overlap and USB transfers
+  // that cross two FFT input buffers.
+  long long usb_ns;
+  uint64_t usb_samples;
 };
 
 extern struct frontend Frontend; // Only one per radio instance
@@ -285,6 +292,12 @@ struct channel {
   float tp1,tp2; // Spare test points that can be read on the status channel
 };
 
+struct rtp_timing {
+  unsigned int fft_jobnum;      // incrementing count of fft/block
+  long long usb_transfer_ns;    // approximate time of first USB transfer for start of block
+  uint64_t usb_sampcount;       // approximate ADC sample count for start of block
+  long long fft_ns;             // timestamp when fft was ran
+};
 
 extern char Hostname[];
 extern struct channel Channel_list[];

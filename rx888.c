@@ -517,6 +517,13 @@ static void rx_callback(struct libusb_transfer * const transfer){
   // Feed directly into FFT input buffer, accumulate energy
   float in_energy = 0; // A/D energy accumulator
   int16_t const * const samples = (int16_t *)transfer->buffer;
+
+  // n5tnl: track time and ADC sample count of first transfer into FFT input buffer
+  if (0 == frontend->usb_ns)
+    frontend->usb_ns = now;
+  if (0 == frontend->usb_samples)
+    frontend->usb_samples = frontend->samples;
+
   float * const wptr = frontend->in.input_write_pointer.r;
   int const sampcount = size / sizeof(int16_t);
   if(sdr->randomizer){
@@ -545,7 +552,14 @@ static void rx_callback(struct libusb_transfer * const transfer){
     }
   }
   frontend->timestamp = now;
-  write_rfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT if block is complete
+  frontend->in.usb_timestamp = frontend->usb_ns;
+  frontend->in.usb_sampcount = frontend->usb_samples;
+  if (write_rfilter(&frontend->in,NULL,sampcount)){ // Update write pointer, invoke FFT if block is complete
+    // n5tnl: FFT started, so zero these so that the next
+    // USB transfer will update time and sample count
+    frontend->usb_ns = 0;
+    frontend->usb_samples = 0;
+  }
 
   // These blocks are kinda small, so exponentially smooth the power readings
   frontend->if_power += Power_smooth * (in_energy / sampcount - frontend->if_power);
