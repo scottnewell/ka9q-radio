@@ -232,10 +232,7 @@ static bool wd_mode = false;
 static int force_sample_rate_error = 0;
 static char const *wd_error_log = 0;
 static double wd_tolerance_seconds = 2.0;
-static uint32_t sync_ssrc = 0;
-static float sync_frequency = 0;
-static bool sync_record = false;
-static uint32_t sync_start_ts;
+static bool bpsk_mode = false;
 
 const char *App_path;
 static int Input_fd,Status_fd;
@@ -282,15 +279,13 @@ static struct option Options[] = {
   {"lengthlimit", required_argument, NULL, 'L'},
   {"limit", required_argument, NULL, 'L'},
   {"ssrc", required_argument, NULL, 'S'},
-  {"sync-ssrc", required_argument, NULL, 1001},
-  {"sync-frequency", required_argument, NULL, 1002},
-  {"sync-record", no_argument, NULL, 1003},
   {"version", no_argument, NULL, 'V'},
   {"max_length", required_argument, NULL, 'x'},
   {"wd_mode", no_argument, NULL, 'W'},
   {"error", required_argument, NULL, 'E'},
   {"wd_errors", required_argument, NULL, 'q'},
   {"wd_tolerance", required_argument, NULL, 'Y'},
+  {"bpsk", no_argument, NULL, 1000},
   {NULL, no_argument, NULL, 0},
 };
 static char Optstring[] = "cd:e:fjl:m:o:rsS:t:vL:Vx:WE:q:Y:";
@@ -304,6 +299,10 @@ int main(int argc,char *argv[]){
   int c;
   while((c = getopt_long(argc,argv,Optstring,Options,NULL)) != EOF){
     switch(c){
+    case 1000:
+      bpsk_mode = true;
+      printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n");
+      break;
     case 'c':
       Catmode = true;
       break;
@@ -361,7 +360,7 @@ int main(int argc,char *argv[]){
       break;
     case 'V':
       VERSION();
-      fputs("wsprdaemon mode (-W): v0.10_sync\n",stdout);
+      fputs("wsprdaemon mode (-W): v0.10\n",stdout);
       exit(EX_OK);
     case 'W':
       wd_mode = true;
@@ -372,10 +371,10 @@ int main(int argc,char *argv[]){
       break;
     case 'E':
       {
-        char *ptr;
-        int32_t x = strtol(optarg,&ptr,0);
-        if(ptr != optarg)
-          force_sample_rate_error = x;
+	char *ptr;
+	int32_t x = strtol(optarg,&ptr,0);
+	if(ptr != optarg)
+	  force_sample_rate_error = x;
       }
       fprintf(stderr,"Warning: sample count error forced to %+d samples\n",force_sample_rate_error);
       break;
@@ -384,28 +383,6 @@ int main(int argc,char *argv[]){
       break;
     case 'Y':
       wd_tolerance_seconds = fabsf(strtof(optarg,NULL));
-      break;
-    case 1001:
-      {
-        char *ptr;
-        int32_t x = strtol(optarg,&ptr,0);
-        if(ptr != optarg)
-          sync_ssrc = x;
-      }
-      fprintf(stderr,"bpsk sync signal on SSRC %u\n",sync_ssrc);
-      break;
-    case 1002:
-      {
-        char *ptr;
-        float x = strtod(optarg,&ptr);
-        if(ptr != optarg)
-          sync_frequency = x;
-      }
-      fprintf(stderr,"bpsk sync signal at %.0f Hz\n",sync_frequency);
-      break;
-    case 1003:
-      sync_record = true;
-      fprintf(stderr,"recording bpsk sync channel\n");
       break;
     default:
       fprintf(stderr,"Usage: %s [-c|--catmode|--stdout] [-r|--raw] [-e|--exec command] [-f|--flush] [-s] [-d directory] [-l locale] [-L maxtime] [-t timeout] [-j|--jt] [-v] [-m sec] [-x|--max_length max_file_time, no sync, oneshot] [--wd_mode|-W] PCM_multicast_address\n",argv[0]);
@@ -596,10 +573,6 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
   sp->samples_written += frames;
   sp->samples_remaining -= frames;
 
-  if (sp->samples_remaining <= sp->samprate * 2){
-    return -1;
-  }
-  
   if(sp->samples_remaining <= 0)
   {
     // hit sample count, close file and create the next one
@@ -682,17 +655,6 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
       sp->max_drops = d;
   }
 
-  uint32_t packet_start_ts = sp->rtp_state.timestamp;
-  uint32_t packet_stop_ts = packet_start_ts + (buffer_size / 8);      // assuming 2 channel IQ file with 32 bit floats
-   
-  if ((sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
-    wd_log(0,"sync start at RTP ts %u: this packet is %u - %u\n",
-           sync_start_ts,
-           packet_start_ts,
-           packet_stop_ts);
-  }
-    
-
   switch(sp->sync_state){
   default:
   case sync_state_startup:
@@ -705,9 +667,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
 
   case sync_state_armed:
     // drop samples until we're in second 0
-
-    /* if (0 == seconds){ */
-    if ((sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
+    if (0 == seconds){
       // first packet in :00, so start recording the file
       sp->sync_state = sync_state_active;
 
@@ -726,15 +686,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
 
         start_wav_stream(sp);
         sp->file_time = now;
-
-        uint32_t frame_offset = sync_start_ts - packet_start_ts;
-        printf("buffer at %p (%u), length %u -- ",samples,samples,buffer_size);
-        float * new_samples = (float*) samples;
-        new_samples += (frame_offset * 2);
-        buffer_size -= (frame_offset * 2 * 4);
-        printf("buffer at %p (%u), length %u\n",new_samples,new_samples,buffer_size);
-        
-        if (0 != wd_write(sp,new_samples,buffer_size,now)){
+        if (0 != wd_write(sp,samples,buffer_size,now)){
           // something went wrong...should we delete the file?
           sp->sync_state = sync_state_startup;
           close_file(sp);
@@ -831,14 +783,14 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
 }
 
 static void bpsk_state_machine(struct session * const sp,struct sockaddr const */*sender*/,void *samples,int buffer_size,int64_t sender_time){
-  if (NULL == sp){
+  if (!bpsk_mode || NULL == sp){
     return;
   }
 
   // don't even bother if SNR is <8 dB or so
   if (Local.snr < 8)
     return;
-
+  
   struct timespec now;
   clock_gettime(CLOCK_REALTIME,&now);
 
@@ -864,27 +816,11 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
       // or if the pulse is <99% of a second?
       if ((ts - sp->last_edge) < ((sp->samprate * 99) / 100))
         noisy = true;
-
+      
       /* if ((ts - sp->last_edge) > ((sp->samprate * 101) / 100)) */
       /*   noisy = true; */
       printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time);
 //      printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n");
-
-      // check if this PPS edge is +/- 0.4 seconds from top of minute -1 second, to arm the wsprdaemon sync start thing
-      struct timespec expected_start = now;
-      expected_start.tv_nsec = 0;
-      expected_start.tv_sec += (time_t)(FileLengthLimit / 2);
-      expected_start.tv_sec /= (time_t)(FileLengthLimit);
-      expected_start.tv_sec *= (time_t)(FileLengthLimit);
-      expected_start.tv_sec -= 1;
-
-      if (fabs(time_diff(expected_start,now)) < 0.4){
-        sync_start_ts = ts + sp->samprate;
-        wd_log(0,"Sync start at next PPS (RTP ts %u)? Time delta: %.3f s\n",
-               ts + sp->samprate,
-               time_diff(now,expected_start));
-      }
-      
       fflush(0);
       sp->last_edge=ts;
     }
@@ -899,7 +835,7 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
 /*   int64_t pll_start_time; */
 /*   double pll_start_phase; */
 /* } Local; */
-
+  
 }
 
 static void closedown(int a){
@@ -1147,6 +1083,7 @@ static void gen_locals(struct channel *channel){
   Local.snr = power2dB(Local.sn0/Local.noise_bandwidth);
 }
 
+
 // Read both data and status from RTP network socket, assemble blocks of samples
 // Doing both in one thread avoids a lot of synchronization problems with the session structure, since both write it
 static void input_loop(){
@@ -1184,11 +1121,7 @@ static void input_loop(){
       struct frontend frontend;
       memset(&frontend,0,sizeof(frontend));
       decode_radio_status(&frontend,&chan,buffer+1,length-1);
-
-      if ((sync_ssrc) && (chan.output.rtp.ssrc == sync_ssrc)){
-        // status packet for the BPSK sync channel, so calc SNR stats
-        gen_locals(&chan);
-      }
+      gen_locals(&chan);
 
       if(Ssrc != 0 && chan.output.rtp.ssrc != Ssrc)
 	goto statdone; // Unwanted session, but still clear any data packets
@@ -1327,23 +1260,6 @@ static void input_loop(){
       }
       sp->last_active = gps_time_ns();
 
-      if ((sync_frequency) && (sp->chan.tune.freq == sync_frequency)){
-        sync_frequency = 0.0;
-        sync_ssrc = rtp.ssrc;
-      }
-
-      if ((sync_ssrc) && (rtp.ssrc == sync_ssrc)){
-	sp->rtp_state.seq = rtp.seq;
-	sp->rtp_state.timestamp = rtp.timestamp;
-
-        int64_t sender_time = sp->chan.clocktime + (int64_t)BILLION * (UNIX_EPOCH - GPS_UTC_OFFSET);
-        sender_time += (int64_t)BILLION * (int32_t)(rtp.timestamp - sp->chan.output.time_snap) / sp->samprate;
-
-        bpsk_state_machine(sp,&sender,dp,size,sender_time);
-        if (!sync_record)
-          goto datadone;
-      }
-
       if (wd_mode){
         if(sp->encoding == S16BE){
           // Flip endianness from big-endian on network to little endian wanted by .wav
@@ -1357,6 +1273,16 @@ static void input_loop(){
 	sp->rtp_state.seq = rtp.seq;
 	sp->rtp_state.timestamp = rtp.timestamp;
         wd_state_machine(sp,&sender,dp,size);
+        goto datadone;
+      }
+      if (bpsk_mode){
+	sp->rtp_state.seq = rtp.seq;
+	sp->rtp_state.timestamp = rtp.timestamp;
+
+        int64_t sender_time = sp->chan.clocktime + (int64_t)BILLION * (UNIX_EPOCH - GPS_UTC_OFFSET);
+        sender_time += (int64_t)BILLION * (int32_t)(rtp.timestamp - sp->chan.output.time_snap) / sp->samprate;
+        
+        bpsk_state_machine(sp,&sender,dp,size,sender_time);
         goto datadone;
       }
 
