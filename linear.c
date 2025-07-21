@@ -71,6 +71,16 @@ int demod_linear(void *arg){
   bool squelch_open = true; // memory for squelch hyseresis, starts open
 
   while(downconvert(chan) == 0){
+
+    if (chan->options & (1 << 2)){
+      chan->options &= ~(1 << 2);
+      char name[64];
+      name[0] = 0;
+      pthread_getname_np(pthread_self(),name,sizeof(name));
+      fprintf(stderr,"n5tnl: %s:demod_linear() hang for 200 ms\n",name);
+      usleep(1000 * 200);
+    }
+
     unsigned int N = chan->sampcount; // Number of raw samples in filter output buffer
     float complex * buffer = chan->baseband; // Working buffer
 

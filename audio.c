@@ -293,6 +293,27 @@ int flush_output(struct channel * chan,bool marker,bool complete){
     rtp.marker = marker;
     marker = false; // only send once
     uint8_t packet[PKTSIZE];
+
+
+    /* hack to simulate missing/extra packets by monkeying the rtp ts/seq counters */
+    if (chan->options & (1 << 0)){
+      rtp.timestamp += (rand() % 100);
+      chan->options &= ~(1 << 0);
+      char name[64];
+      name[0] = 0;
+      pthread_getname_np(pthread_self(),name,sizeof(name));
+      fprintf(stderr,"n5tnl: %s:flush_output() preturb RTP timestamp\n",name);
+    }
+    if (chan->options & (1 << 1)){
+      rtp.seq += (rand() % 100);
+      chan->options &= ~(1 << 1);
+      char name[64];
+      name[0] = 0;
+      pthread_getname_np(pthread_self(),name,sizeof(name));
+      fprintf(stderr,"n5tnl: %s:flush_output() preturb RTP sequence counter\n",name);
+    }
+
+
     uint8_t * const dp = (uint8_t *)hton_rtp(packet,&rtp); // First byte after RTP header to be written
     int bytes = 0;
     float const *buf = &chan->output.queue[chan->output.rp]; // Point to first sample to be output

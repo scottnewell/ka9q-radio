@@ -196,6 +196,7 @@ struct session {
   uint32_t max_rx_queue;
   uint32_t max_drops;
   uint32_t last_block_drops;
+  bool session_errors_init;     // true once the session has run wd_check() at least once to set the next expected ts,seq
 
   float last_angle;
   uint32_t last_edge;
@@ -523,41 +524,43 @@ static void clear_queue_counters(struct session * const sp){
   sp->max_drops = 0;
 }
 
-static int wd_write(struct session * const sp,void *samples,int buffer_size,struct timespec now){
-  if(NULL == sp->fp)
-    return -1;
+static void wd_check(struct session * const sp,int buffer_size,struct rtp_header *rtp){
+  /* if (!sp->session_errors_init){ */
+  /*   wd_log(0,"wd_check(): SSRC %u first check of session?\n", */
+  /*          sp->ssrc); */
+  /* } */
 
   // track sequence numbers and report if we see one out of order (except the first datagram of file)
-  if ((0 != sp->total_file_samples) && (sp->rtp_state.seq != sp->next_expected_rtp_seq)){
+  if ((sp->session_errors_init) && (rtp->seq != sp->next_expected_rtp_seq)){
     wd_log(0,"Weird rtp.seq: expected %u, received %u (delta %d) on SSRC %d (tx %u, rx %u, drops %u)\n",
            sp->next_expected_rtp_seq,
-           sp->rtp_state.seq,
-           (int16_t)(sp->rtp_state.seq - sp->next_expected_rtp_seq),
+           rtp->seq,
+           (int16_t)(rtp->seq - sp->next_expected_rtp_seq),
            sp->ssrc,
            sp->max_tx_queue,
            sp->max_rx_queue,
            sp->max_drops);
   }
-  sp->next_expected_rtp_seq = sp->rtp_state.seq + 1;    // next expected RTP sequence number
+  sp->next_expected_rtp_seq = rtp->seq + 1;    // next expected RTP sequence number
 
   int framesize = sp->channels * (sp->encoding == F32LE ? 4 : 2); // bytes per sample time
   int frames = buffer_size / framesize;  // One frame per sample time
 
   // is the rtp.timestamp value what we expect from the last datagram (don't log on first datagram of file)
-  if ((0 != sp->total_file_samples) && (sp->rtp_state.timestamp != sp->next_expected_rtp_ts)){
+  if ((sp->session_errors_init) && (rtp->timestamp != sp->next_expected_rtp_ts)){
     wd_log(0,"Weird rtp.timestamp: expected %u, received %u (delta %d) on SSRC %d (tx %u, rx %u, drops %u)\n",
            sp->next_expected_rtp_ts,
-           sp->rtp_state.timestamp,
-           sp->rtp_state.timestamp - sp->next_expected_rtp_ts,
+           rtp->timestamp,
+           rtp->timestamp - sp->next_expected_rtp_ts,
            sp->ssrc,
            sp->max_tx_queue,
            sp->max_rx_queue,
            sp->max_drops);
   }
-  sp->next_expected_rtp_ts = sp->rtp_state.timestamp + frames;    // next expected RTP timestamp
+  sp->next_expected_rtp_ts = rtp->timestamp + frames;    // next expected RTP timestamp
 
   // if the output filter dropped a block, emit a warning
-  if (sp->last_block_drops != sp->chan.filter.out.block_drops){
+  if ((sp->session_errors_init) && (sp->last_block_drops != sp->chan.filter.out.block_drops)){
     wd_log(0,"Weird block_drops: expected %u, received %u on SSRC %d (tx %u, rx %u, drops %u)\n",
            sp->last_block_drops,
            sp->chan.filter.out.block_drops,
@@ -565,8 +568,17 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
            sp->max_tx_queue,
            sp->max_rx_queue,
            sp->max_drops);
-    sp->last_block_drops = sp->chan.filter.out.block_drops;
   }
+  sp->last_block_drops = sp->chan.filter.out.block_drops;
+  sp->session_errors_init = true;
+}
+
+static int wd_write(struct session * const sp,void *samples,int buffer_size,struct timespec now){
+  if(NULL == sp->fp)
+    return -1;
+
+  int framesize = sp->channels * (sp->encoding == F32LE ? 4 : 2); // bytes per sample time
+  int frames = buffer_size / framesize;  // One frame per sample time
 
   // check time of first sample: if it's more than +/- x seconds from expected, force resync on nex tfile
   if (0 == sp->total_file_samples){
@@ -728,11 +740,11 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         sp->file_time = now;
 
         uint32_t frame_offset = sync_start_ts - packet_start_ts;
-        printf("buffer at %p (%u), length %u -- ",samples,samples,buffer_size);
+        /* printf("buffer at %p (%lu), length %u -- ",samples,(unsigned long int)samples,buffer_size); */
         float * new_samples = (float*) samples;
         new_samples += (frame_offset * 2);
         buffer_size -= (frame_offset * 2 * 4);
-        printf("buffer at %p (%u), length %u\n",new_samples,new_samples,buffer_size);
+        /* printf("buffer at %p (%lu), length %u\n",new_samples,(unsigned long int)new_samples,buffer_size); */
         
         if (0 != wd_write(sp,new_samples,buffer_size,now)){
           // something went wrong...should we delete the file?
@@ -1302,6 +1314,8 @@ static void input_loop(){
 	Sessions = sp;
       }
 
+      wd_check(sp,size,&rtp);
+
       if(sp->fp == NULL && !sp->complete && !wd_mode){
 	session_file_init(sp,&sender);
 	if(sp->encoding == OPUS){
@@ -1345,6 +1359,8 @@ static void input_loop(){
       }
 
       if (wd_mode){
+	sp->rtp_state.seq = rtp.seq;
+	sp->rtp_state.timestamp = rtp.timestamp;
         if(sp->encoding == S16BE){
           // Flip endianness from big-endian on network to little endian wanted by .wav
           // byteswap.h is linux-specific; need to find a portable way to get the machine instructions
@@ -1354,8 +1370,6 @@ static void input_loop(){
           for(int n = 0; n < samp_count; n++)
             wp[n] = bswap_16((uint16_t)samples[n]);
         }
-	sp->rtp_state.seq = rtp.seq;
-	sp->rtp_state.timestamp = rtp.timestamp;
         wd_state_machine(sp,&sender,dp,size);
         goto datadone;
       }
