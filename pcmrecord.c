@@ -62,6 +62,7 @@ Command-line options:
 #include <inttypes.h>
 #include <ogg/ogg.h>
 #include <stdarg.h>
+#include <syslog.h>
 
 #include "misc.h"
 #include "attr.h"
@@ -202,6 +203,7 @@ struct session {
   uint32_t last_edge;
   uint32_t last_snap_ts;
   uint64_t last_snap_gps;
+  uint32_t start_ts;
 };
 
 static struct {
@@ -298,7 +300,7 @@ static char Optstring[] = "cd:e:fjl:m:o:rsS:t:vL:Vx:WE:q:Y:";
 
 int main(int argc,char *argv[]){
   App_path = argv[0];
-
+  openlog(App_path, LOG_PID | LOG_CONS, LOG_USER);
   // Defaults
   Locale = getenv("LANG");
 
@@ -580,7 +582,7 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
   int framesize = sp->channels * (sp->encoding == F32LE ? 4 : 2); // bytes per sample time
   int frames = buffer_size / framesize;  // One frame per sample time
 
-  // check time of first sample: if it's more than +/- x seconds from expected, force resync on nex tfile
+  // check time of first sample: if it's more than +/- x seconds from expected, force resync on next file
   if (0 == sp->total_file_samples){
     struct timespec expected_start = now;
     expected_start.tv_nsec = 0;
@@ -600,17 +602,77 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
     clear_queue_counters(sp);
   }
 
-  fwrite(samples,framesize,frames,sp->fp);
-  sp->total_file_samples += frames;
-  sp->current_segment_samples += frames;
+  int partial_frames = frames;
+  if (partial_frames > sp->samples_remaining){
+     wd_log(0,"SSRC %u Too many frames in this packet! %ld remain, %u this packet\n",
+	    sp->ssrc,
+	    sp->samples_remaining,
+	    partial_frames);
+     partial_frames = sp->samples_remaining;
+  }
+
+  fwrite(samples,framesize,partial_frames,sp->fp);
+  sp->total_file_samples += partial_frames;
+  sp->current_segment_samples += partial_frames;
   if(sp->current_segment_samples >= SubstantialFileTime * sp->samprate)
     sp->substantial_file = true;
-  sp->samples_written += frames;
-  sp->samples_remaining -= frames;
+  sp->samples_written += partial_frames;
+  sp->samples_remaining -= partial_frames;
 
-  if (sp->samples_remaining <= sp->samprate * 2){
-    return -1;
+  // if we wrote a partial, finish up in the new file
+  if (partial_frames < frames){
+    wd_log(0,"SSRC %u frames: %d partial %d samples %p %ld new samples %p %ld\n",
+           sp->ssrc,
+           frames,
+           partial_frames,
+           samples,
+           (long int)samples,
+           (void*)((float*)samples + (partial_frames * sp->channels)),
+           (long int)(void*)((float*)samples + (partial_frames * sp->channels)));
+    close_file(sp);
+
+    // start new file
+    session_file_init(sp,&sp->sender);
+    sp->sync_state = sync_state_active;
+    sp->start_ts = sp->rtp_state.timestamp + partial_frames;
+    wd_log(0,"SSRC %u set start ts to %u (RTP TS %u, partial %u) wd_write()\n",
+           sp->ssrc,
+           sp->start_ts,
+           sp->rtp_state.timestamp,
+           partial_frames);
+
+    // spit out the estimated start time of the stream, based on sample rate and RTP timestamp, ignoring rollovers
+    wd_log(1, "SSRC %u start partial file with seq %u timestamp %u, estimated stream start is %u s ago\n",
+           sp->ssrc,
+           sp->rtp_state.seq,
+           sp->rtp_state.timestamp,
+           sp->rtp_state.timestamp / sp->samprate);
+
+    start_wav_stream(sp);
+    sp->file_time = now;
+    wd_log(0,"SSRC %u starting in the middle of a packet. partial_frames = %d, frames = %d, samples = %p (%ld)\n",
+           sp->ssrc,
+           partial_frames,frames,samples,(long int)samples);
+    samples = (void*)((float*) samples + (partial_frames * sp->channels));
+    partial_frames = frames - partial_frames;
+    wd_log(0,"SSRC %u Starting in the middle of a packet. partial_frames = %d, frames = %d, samples = %p (%ld)\n",
+           sp->ssrc,
+           partial_frames,
+           frames,samples,
+           (long int)samples);
+
+    fwrite(samples,framesize,partial_frames,sp->fp);
+    sp->total_file_samples += partial_frames;
+    sp->current_segment_samples += partial_frames;
+    if(sp->current_segment_samples >= SubstantialFileTime * sp->samprate)
+      sp->substantial_file = true;
+    sp->samples_written += partial_frames;
+    sp->samples_remaining -= partial_frames;
   }
+
+  /* if (sp->samples_remaining <= sp->samprate * 2){ */
+  /*   return -1; */
+  /* } */
   
   if(sp->samples_remaining <= 0)
   {
@@ -698,7 +760,8 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
   uint32_t packet_stop_ts = packet_start_ts + (buffer_size / 8);      // assuming 2 channel IQ file with 32 bit floats
    
   if ((sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
-    wd_log(0,"sync start at RTP ts %u: this packet is %u - %u\n",
+    wd_log(0,"SSRC %u sync start at RTP ts %u: this packet is %u - %u\n",
+           sp->ssrc,
            sync_start_ts,
            packet_start_ts,
            packet_stop_ts);
@@ -730,7 +793,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         sp->sync_state = sync_state_active;
 
         // spit out the estimated start time of the stream, based on sample rate and RTP timestamp, ignoring rollovers
-        wd_log(1, "Start file on SSRC %d with seq %u timestamp %u, estimated stream start is %u s ago\n",
+        wd_log(1, "SSRC %u start file with seq %u timestamp %u, estimated stream start is %u s ago\n",
                sp->ssrc,
                sp->rtp_state.seq,
                sp->rtp_state.timestamp,
@@ -745,6 +808,13 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         new_samples += (frame_offset * 2);
         buffer_size -= (frame_offset * 2 * 4);
         /* printf("buffer at %p (%lu), length %u\n",new_samples,(unsigned long int)new_samples,buffer_size); */
+        sp->start_ts = sp->rtp_state.timestamp + frame_offset;
+        wd_log(0,"SSRC %u set start ts to %u (RTP TS %u, partial %u) wd_state_machine()\n",
+               sp->ssrc,
+               sp->start_ts,
+               sp->rtp_state.timestamp,
+               frame_offset);
+
         
         if (0 != wd_write(sp,new_samples,buffer_size,now)){
           // something went wrong...should we delete the file?
@@ -842,6 +912,22 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
   }
 }
 
+void log_printf(const char* format, ...){
+  va_list args;
+  va_start(args, format);
+  char* buff;
+  if (vasprintf(&buff, format, args)>=0)
+  {
+    syslog(LOG_INFO, "%s", buff);
+    free(buff);
+  }
+  va_end(args);
+}
+
+static uint32_t pps_consecutive = 0;
+static uint32_t pps_ok = 0;
+static uint32_t pps_noise = 0;
+
 static void bpsk_state_machine(struct session * const sp,struct sockaddr const */*sender*/,void *samples,int buffer_size,int64_t sender_time){
   if (NULL == sp){
     return;
@@ -882,6 +968,14 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
       printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time);
 //      printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n");
 
+      if (noisy){
+        ++pps_noise;
+        pps_consecutive = 0;
+      } else{
+        ++pps_ok;
+        ++pps_consecutive;
+      }
+
       // check if this PPS edge is +/- 0.4 seconds from top of minute -1 second, to arm the wsprdaemon sync start thing
       struct timespec expected_start = now;
       expected_start.tv_nsec = 0;
@@ -892,7 +986,14 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
 
       if (fabs(time_diff(expected_start,now)) < 0.4){
         sync_start_ts = ts + sp->samprate;
-        wd_log(0,"Sync start at next PPS (RTP ts %u)? Time delta: %.3f s\n",
+        log_printf("SSRC %u PPS ok: %u PPS noise: %u consecutive ok: %u sync at TS %u",
+                   sp->ssrc,
+                   pps_ok,
+                   pps_noise,
+                   pps_consecutive,
+                   ts + sp->samprate);
+        wd_log(0,"SSRC %u sync start at next PPS (RTP ts %u)? Time delta: %.3f s\n",
+               sp->ssrc,
                ts + sp->samprate,
                time_diff(now,expected_start));
       }
@@ -1833,7 +1934,13 @@ static int close_file(struct session *sp){
       attrprintf(fd,"elapsed","%.6f",time_diff(now,sp->file_time));
       if (wd_mode){
         attrprintf(fd,"drift","%.6f",time_diff(sp->file_time,sp->wd_file_time));
-        wd_log(1,"Close file at %ld.%09ld, %.6f s elapsed, %.6f drift\n",
+        if (sync_ssrc)
+          attrprintf(fd,"PPS RTP timestamp","%u",sync_start_ts);
+
+        if (sync_ssrc)
+          attrprintf(fd,"Start RTP timestamp","%u",sp->start_ts);
+        wd_log(1,"SSRC %u close file at %ld.%09ld, %.6f s elapsed, %.6f drift\n",
+               sp->ssrc,
                (long)now.tv_sec,
                (long)now.tv_nsec,
                time_diff(now,sp->file_time),
