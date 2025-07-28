@@ -742,12 +742,12 @@ static int rx888_usb_init(struct sdrstate *const sdr,const char * const firmware
   // Stop and reopen in case it was left running - KA9Q
   usleep(5000);
   command_send(sdr->dev_handle,STOPFX3,0);
-  {
-    int r = libusb_reset_device(sdr->dev_handle);
-    if(r != 0){
-      fprintf(stderr,"reset failed, %d\n",r);
-    }
-  }
+  /* { */
+  /*   int r = libusb_reset_device(sdr->dev_handle); */
+  /*   if(r != 0){ */
+  /*     fprintf(stderr,"reset failed, %d\n",r); */
+  /*   } */
+  /* } */
   {
     int ret = libusb_kernel_driver_active(sdr->dev_handle,0);
     if(ret != 0){
