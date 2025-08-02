@@ -239,6 +239,7 @@ static uint32_t sync_ssrc = 0;
 static float sync_frequency = 0;
 static bool sync_record = false;
 static uint32_t sync_start_ts;
+static int32_t sync_pretrigger;
 
 const char *App_path;
 static int Input_fd,Status_fd;
@@ -288,6 +289,7 @@ static struct option Options[] = {
   {"sync-ssrc", required_argument, NULL, 1001},
   {"sync-frequency", required_argument, NULL, 1002},
   {"sync-record", no_argument, NULL, 1003},
+  {"sync-pretrigger", required_argument, NULL, 1004},
   {"version", no_argument, NULL, 'V'},
   {"max_length", required_argument, NULL, 'x'},
   {"wd_mode", no_argument, NULL, 'W'},
@@ -409,6 +411,15 @@ int main(int argc,char *argv[]){
     case 1003:
       sync_record = true;
       fprintf(stderr,"recording bpsk sync channel\n");
+      break;
+    case 1004:
+      {
+        char *ptr;
+        int32_t x = strtol(optarg,&ptr,0);
+        if(ptr != optarg)
+          sync_pretrigger = x;
+      }
+      fprintf(stderr,"bpsk pretrigger at %d samples\n",sync_pretrigger);
       break;
     default:
       fprintf(stderr,"Usage: %s [-c|--catmode|--stdout] [-r|--raw] [-e|--exec command] [-f|--flush] [-s] [-d directory] [-l locale] [-L maxtime] [-t timeout] [-j|--jt] [-v] [-m sec] [-x|--max_length max_file_time, no sync, oneshot] [--wd_mode|-W] PCM_multicast_address\n",argv[0]);
@@ -1030,15 +1041,16 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
 
       if (fabs(time_diff(expected_start,now)) < 0.4){
         sync_start_ts = ts + sp->samprate;
+        sync_start_ts += sync_pretrigger;
         log_printf("SSRC %u PPS ok: %u PPS noise: %u consecutive ok: %u sync at TS %u",
                    sp->ssrc,
                    pps_ok,
                    pps_noise,
                    pps_consecutive,
-                   ts + sp->samprate);
+                   sync_start_ts);
         wd_log(0,"SSRC %u sync start at next PPS (RTP ts %u)? Time delta: %.3f s\n",
                sp->ssrc,
-               ts + sp->samprate,
+               sync_start_ts,
                time_diff(now,expected_start));
       }
       
@@ -1462,6 +1474,7 @@ static void input_loop(){
       wd_check(sp,size,&rtp);
 
       if(sp->fp == NULL && !sp->complete && !wd_mode){
+        sp->start_ts = rtp.timestamp;
 	session_file_init(sp,&sender);
 	if(sp->encoding == OPUS){
 	  if(Raw)
@@ -1879,12 +1892,13 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   }
   // We byte swap S16BE to S16LE, so change the tag
   if(Verbose){
-    fprintf(stderr,"%s creating '%s' %d s/s %s %s %'.3lf Hz %s",
+    fprintf(stderr,"%s creating %s %d s/s %s %s %'.3lf Hz %s TS %u",
 	    sp->frontend.description,
 	    sp->filename,sp->chan.output.samprate, // original rx samprate for opus
 	    sp->channels == 1 ? "mono" : "stereo",
 	    file_encoding,sp->chan.tune.freq,
-	    sp->chan.preset);
+	    sp->chan.preset,
+	    sp->start_ts);
     if(sp->starting_offset > 0)
       fprintf(stderr," offset %lld",(long long)sp->starting_offset);
     fputc('\n',stderr);
@@ -1908,6 +1922,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
 
   attrprintf(fd,"Start RTP seq","%u",sp->start_sequence);
   attrprintf(fd,"Start timesnap","%.6f s",1.0e-9 * sp->start_timesnap);
+  attrprintf(fd,"Pretrigger","%d",sync_pretrigger);
 
   if(strlen(sp->frontend.description) > 0)
     attrprintf(fd,"description","%s",sp->frontend.description);
@@ -1977,13 +1992,12 @@ static int close_file(struct session *sp){
       clock_gettime(CLOCK_REALTIME,&now);
       attrprintf(fd,"end time","%ld.%09ld",(long)now.tv_sec,(long)now.tv_nsec);
       attrprintf(fd,"elapsed","%.6f",time_diff(now,sp->file_time));
+      attrprintf(fd,"Start RTP timestamp","%u",sp->start_ts);
+
       if (wd_mode){
         attrprintf(fd,"drift","%.6f",time_diff(sp->file_time,sp->wd_file_time));
         if (sync_ssrc)
-        attrprintf(fd,"PPS RTP timestamp","%u",sync_start_ts);
-
-        /* if (sync_ssrc) */
-        attrprintf(fd,"Start RTP timestamp","%u",sp->start_ts);
+          attrprintf(fd,"PPS RTP timestamp","%u",sync_start_ts);
 
         wd_log(1,"SSRC %u close file at %ld.%09ld, %.6f s elapsed, %.6f drift\n",
                sp->ssrc,
