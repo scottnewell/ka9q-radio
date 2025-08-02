@@ -201,9 +201,9 @@ struct session {
 
   float last_angle;
   uint32_t last_edge;
-  uint32_t last_snap_ts;
-  uint64_t last_snap_gps;
   uint32_t start_ts;
+  int64_t start_timesnap;
+  uint32_t start_sequence;
 };
 
 static struct {
@@ -364,7 +364,7 @@ int main(int argc,char *argv[]){
       break;
     case 'V':
       VERSION();
-      fputs("wsprdaemon mode (-W): v0.10_sync\n",stdout);
+      fputs("wsprdaemon mode (-W): v0.11_sync\n",stdout);
       exit(EX_OK);
     case 'W':
       wd_mode = true;
@@ -575,6 +575,12 @@ static void wd_check(struct session * const sp,int buffer_size,struct rtp_header
   sp->session_errors_init = true;
 }
 
+int64_t calculated_starting_timesnap(struct session * const sp, uint32_t rtp_timestamp){
+        int64_t sender_time = sp->chan.clocktime + (int64_t)BILLION * (UNIX_EPOCH - GPS_UTC_OFFSET);
+        sender_time += (int64_t)BILLION * (int32_t)(rtp_timestamp - sp->chan.output.time_snap) / sp->samprate;
+        return sender_time;
+}
+
 static int wd_write(struct session * const sp,void *samples,int buffer_size,struct timespec now){
   if(NULL == sp->fp)
     return -1;
@@ -632,9 +638,11 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
     close_file(sp);
 
     // start new file
+    sp->start_ts = sp->rtp_state.timestamp + partial_frames;
+    sp->start_sequence = sp->rtp_state.seq;
+    sp->start_timesnap = calculated_starting_timesnap(sp,sp->start_ts);
     session_file_init(sp,&sp->sender);
     sp->sync_state = sync_state_active;
-    sp->start_ts = sp->rtp_state.timestamp + partial_frames;
     wd_log(0,"SSRC %u set start ts to %u (RTP TS %u, partial %u) wd_write()\n",
            sp->ssrc,
            sp->start_ts,
@@ -759,14 +767,14 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
   uint32_t packet_start_ts = sp->rtp_state.timestamp;
   uint32_t packet_stop_ts = packet_start_ts + (buffer_size / 8);      // assuming 2 channel IQ file with 32 bit floats
    
-  if ((sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
+  if ((0 != sync_ssrc) && (sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
+    // PPS sync mode
     wd_log(0,"SSRC %u sync start at RTP ts %u: this packet is %u - %u\n",
            sp->ssrc,
            sync_start_ts,
            packet_start_ts,
            packet_stop_ts);
   }
-    
 
   switch(sp->sync_state){
   default:
@@ -779,16 +787,31 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
     break;
 
   case sync_state_armed:
-    // drop samples until we're in second 0
+    // drop samples until we're in second 0 or see the PPS edge
 
-    /* if (0 == seconds){ */
-    if ((sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
-      // first packet in :00, so start recording the file
+    bool start = false;
+    if (0 == sync_ssrc){
+      // wd mode, no PPS sync channel, start with first datagram in second 0
+      if (0 == seconds){
+        start = true;
+        sync_start_ts = packet_start_ts;
+      }
+    } else {
+      // PPS sync mode, only start when the PPS is in this datagram
+      if ((sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
+        start=true;
+      }
+    }
+
+    if (true == start){
+      // either first datagram in :00 or PPS detected in this datagram--start recording
       sp->sync_state = sync_state_active;
 
       if(sp->fp == NULL && !sp->complete){
         // create new file in second :00
         sp->wd_file_time.tv_sec = 0;
+        sp->start_sequence = sp->rtp_state.seq;
+        sp->start_timesnap = calculated_starting_timesnap(sp,sync_start_ts);
         session_file_init(sp,sender);
         sp->sync_state = sync_state_active;
 
@@ -796,8 +819,8 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         wd_log(1, "SSRC %u start file with seq %u timestamp %u, estimated stream start is %u s ago\n",
                sp->ssrc,
                sp->rtp_state.seq,
-               sp->rtp_state.timestamp,
-               sp->rtp_state.timestamp / sp->samprate);
+               sync_start_ts,
+               sync_start_ts / sp->samprate);
 
         start_wav_stream(sp);
         sp->file_time = now;
@@ -847,6 +870,8 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
 
   case sync_state_done:
     // last time through the file was complete, so start a new one
+    sp->start_sequence = sp->rtp_state.seq;
+    sp->start_timesnap = calculated_starting_timesnap(sp,sp->rtp_state.timestamp);
     session_file_init(sp,sender);
     sp->sync_state = sync_state_active;
 
@@ -890,6 +915,8 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
       // first packet in :00, resync and start clean after the short file
       close_file(sp);
       sp->wd_file_time.tv_sec = 0;
+      sp->start_sequence = sp->rtp_state.seq;
+      sp->start_timesnap = calculated_starting_timesnap(sp,sp->rtp_state.timestamp);
       session_file_init(sp,sender);
       sp->sync_state = sync_state_active;
 
@@ -931,6 +958,23 @@ static uint32_t pps_noise = 0;
 static void bpsk_state_machine(struct session * const sp,struct sockaddr const */*sender*/,void *samples,int buffer_size,int64_t sender_time){
   if (NULL == sp){
     return;
+  }
+
+  {
+    static bool wrong_mode_warning = false;
+    if ((strcmp("iq",sp->chan.preset)) || (2 != sp->channels) || (F32LE != sp->encoding)){
+      if (!wrong_mode_warning){
+        fprintf(stderr,"SSRC %u mode %s channels %d encoding %s unsupported! Must be 2 channel IQ float\n",
+                sp->ssrc,
+                sp->chan.preset,
+                sp->channels,
+                encoding_string(sp->encoding));
+      }
+      wrong_mode_warning = true;
+      return;
+    } else {
+      wrong_mode_warning = false;
+    }
   }
 
   // don't even bother if SNR is <8 dB or so
@@ -1672,11 +1716,9 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
     if (sp->wd_file_time.tv_sec){
       // not the first file in the series, so +60 (well, FileLengthLimit) seconds from last file time
       sp->wd_file_time.tv_sec += FileLengthLimit;
-      //wd_log(1,"New file named +%.0f s from last: %ld.%03ld\n",FileLengthLimit,sp->wd_file_time.tv_sec,sp->wd_file_time.tv_nsec/1000000);
     } else {
       // first file in series, use current time to name it
       sp->wd_file_time = file_time;
-      //wd_log(1,"New file named from current time due to startup or resync: %ld.%03ld\n",sp->wd_file_time.tv_sec,sp->wd_file_time.tv_nsec/1000000);
     }
   } else {
     // not wd mode, use current time
@@ -1864,6 +1906,9 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   attrprintf(fd,"multicast","%s",PCM_mcast_address_text);
   attrprintf(fd,"unixstarttime","%ld.%09ld",(long)now.tv_sec,(long)now.tv_nsec);
 
+  attrprintf(fd,"Start RTP seq","%u",sp->start_sequence);
+  attrprintf(fd,"Start timesnap","%.6f s",1.0e-9 * sp->start_timesnap);
+
   if(strlen(sp->frontend.description) > 0)
     attrprintf(fd,"description","%s",sp->frontend.description);
 
@@ -1935,10 +1980,11 @@ static int close_file(struct session *sp){
       if (wd_mode){
         attrprintf(fd,"drift","%.6f",time_diff(sp->file_time,sp->wd_file_time));
         if (sync_ssrc)
-          attrprintf(fd,"PPS RTP timestamp","%u",sync_start_ts);
+        attrprintf(fd,"PPS RTP timestamp","%u",sync_start_ts);
 
-        if (sync_ssrc)
-          attrprintf(fd,"Start RTP timestamp","%u",sp->start_ts);
+        /* if (sync_ssrc) */
+        attrprintf(fd,"Start RTP timestamp","%u",sp->start_ts);
+
         wd_log(1,"SSRC %u close file at %ld.%09ld, %.6f s elapsed, %.6f drift\n",
                sp->ssrc,
                (long)now.tv_sec,
