@@ -68,6 +68,7 @@ Command-line options:
 #include "attr.h"
 #include "multicast.h"
 #include "radio.h"
+#include "status.h"
 
 // size of stdio buffer for disk I/O. 8K is probably the default, but we have this for possible tuning
 #define BUFFERSIZE (8192) // probably the same as default
@@ -966,6 +967,47 @@ static uint32_t pps_consecutive = 0;
 static uint32_t pps_ok = 0;
 static uint32_t pps_noise = 0;
 
+static void fix_mode(struct session * const sp){
+  // Probably need a rate limit so we don't hammer radiod
+  // hf.local hardcoded is bad. Can we send to the source of the status packets instead?
+  // move socket stuff to global init so that it's not leaky
+  // anything else that needs to be config'd? IQ, float, AGC off, gain 0 dB?
+  uint8_t cmdbuffer[PKTSIZE];
+  uint8_t *bp = cmdbuffer;
+  *bp++ = CMD; // Command
+
+  encode_int(&bp,OUTPUT_SSRC,sp->ssrc); // Specific SSRC
+  int sent_tag = arc4random();
+  encode_int(&bp,COMMAND_TAG,sent_tag); // Append a command tag
+  encode_string(&bp,PRESET,"iq",strlen("iq"));
+  encode_int(&bp,OUTPUT_ENCODING,F32LE);
+  encode_float(&bp,GAIN,0);
+  encode_int(&bp,AGC_ENABLE,false); // Turn off AGC for manual gain
+  encode_eol(&bp);
+  int command_len = bp - cmdbuffer;
+
+  const char *multicast_group = "hf.local";
+  char iface[1024];
+  struct sockaddr Metadata_dest_socket;
+  int Mcast_ttl = 1;
+  int IP_tos = 48;
+  int Ctl_fd;
+
+  resolve_mcast(multicast_group,&Metadata_dest_socket,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
+  Ctl_fd = connect_mcast(&Metadata_dest_socket,iface,Mcast_ttl,IP_tos);
+  if(Ctl_fd < 0){
+    fprintf(stderr,"Control connection failed!\n");
+  } else {
+    fprintf(stderr,"Control connection ok\n");
+  }
+
+  if(send(Ctl_fd, cmdbuffer, command_len, 0) != command_len){
+    fprintf(stderr,"Control command send error: %s\n",strerror(errno));
+  } else {
+    fprintf(stderr,"Control command sent ok.\n");
+  }
+}
+
 static void bpsk_state_machine(struct session * const sp,struct sockaddr const */*sender*/,void *samples,int buffer_size,int64_t sender_time){
   if (NULL == sp){
     return;
@@ -982,6 +1024,7 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
                 encoding_string(sp->encoding));
       }
       wrong_mode_warning = true;
+      fix_mode(sp);
       return;
     } else {
       wrong_mode_warning = false;
