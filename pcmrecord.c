@@ -241,9 +241,10 @@ static float sync_frequency = 0;
 static bool sync_record = false;
 static uint32_t sync_start_ts;
 static int32_t sync_pretrigger;
+static char* radio_mcast_group = NULL;
 
 const char *App_path;
-static int Input_fd,Status_fd;
+static int Input_fd,Status_fd,Control_fd;
 static struct session *Sessions;
 int Mcast_ttl;
 struct sockaddr Metadata_dest_socket;
@@ -461,7 +462,11 @@ int main(int argc,char *argv[]){
     resolve_mcast(PCM_mcast_address_text,&mcast_dest_sock,DEFAULT_RTP_PORT,iface,sizeof(iface),0);
     Input_fd = listen_mcast(Source_socket,&mcast_dest_sock,iface);
     resolve_mcast(PCM_mcast_address_text,&sock,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
+    fprintf(stderr,"mcast group: %s\n",PCM_mcast_address_text);
+    fprintf(stderr,"mcast port: %d\n",DEFAULT_STAT_PORT);
+    fprintf(stderr,"mcast iface: %s\n",iface);
     Status_fd = listen_mcast(Source_socket,&sock,iface);
+    Control_fd = -1;
   }
   if(Input_fd == -1){
     fprintf(stderr,"Can't set up PCM input, exiting\n");
@@ -968,43 +973,28 @@ static uint32_t pps_ok = 0;
 static uint32_t pps_noise = 0;
 
 static void fix_mode(struct session * const sp){
-  // Probably need a rate limit so we don't hammer radiod
-  // hf.local hardcoded is bad. Can we send to the source of the status packets instead?
-  // move socket stuff to global init so that it's not leaky
-  // anything else that needs to be config'd? IQ, float, AGC off, gain 0 dB?
-  uint8_t cmdbuffer[PKTSIZE];
-  uint8_t *bp = cmdbuffer;
-  *bp++ = CMD; // Command
+  if (Control_fd >= 0){
+    // Probably need a rate limit so we don't hammer radiod
+    // anything else that needs to be config'd? IQ, float, AGC off, gain 0 dB?
+    uint8_t cmdbuffer[PKTSIZE];
+    uint8_t *bp = cmdbuffer;
+    *bp++ = CMD; // Command
 
-  encode_int(&bp,OUTPUT_SSRC,sp->ssrc); // Specific SSRC
-  int sent_tag = arc4random();
-  encode_int(&bp,COMMAND_TAG,sent_tag); // Append a command tag
-  encode_string(&bp,PRESET,"iq",strlen("iq"));
-  encode_int(&bp,OUTPUT_ENCODING,F32LE);
-  encode_float(&bp,GAIN,0);
-  encode_int(&bp,AGC_ENABLE,false); // Turn off AGC for manual gain
-  encode_eol(&bp);
-  int command_len = bp - cmdbuffer;
+    encode_int(&bp,OUTPUT_SSRC,sp->ssrc); // Specific SSRC
+    int sent_tag = arc4random();
+    encode_int(&bp,COMMAND_TAG,sent_tag); // Append a command tag
+    encode_string(&bp,PRESET,"iq",strlen("iq"));
+    encode_int(&bp,OUTPUT_ENCODING,F32LE);
+    encode_float(&bp,GAIN,0);
+    encode_int(&bp,AGC_ENABLE,false); // Turn off AGC for manual gain
+    encode_eol(&bp);
+    int command_len = bp - cmdbuffer;
 
-  const char *multicast_group = "hf.local";
-  char iface[1024];
-  struct sockaddr Metadata_dest_socket;
-  int Mcast_ttl = 1;
-  int IP_tos = 48;
-  int Ctl_fd;
-
-  resolve_mcast(multicast_group,&Metadata_dest_socket,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
-  Ctl_fd = connect_mcast(&Metadata_dest_socket,iface,Mcast_ttl,IP_tos);
-  if(Ctl_fd < 0){
-    fprintf(stderr,"Control connection failed!\n");
-  } else {
-    fprintf(stderr,"Control connection ok\n");
-  }
-
-  if(send(Ctl_fd, cmdbuffer, command_len, 0) != command_len){
-    fprintf(stderr,"Control command send error: %s\n",strerror(errno));
-  } else {
-    fprintf(stderr,"Control command sent ok.\n");
+    if(send(Control_fd, cmdbuffer, command_len, 0) != command_len){
+      fprintf(stderr,"Control command send error: %s\n",strerror(errno));
+    } else {
+      fprintf(stderr,"Control command sent ok.\n");
+    }
   }
 }
 
@@ -1350,6 +1340,62 @@ static int send_wav_queue(struct session * const sp,bool flush){
   return count;
 }
 
+void extract_source(uint8_t const * const buffer,int length){
+  uint8_t const *cp = buffer;
+
+  while(cp - buffer < length){
+    enum status_type const type = *cp++; // increment cp to length field
+
+    if(type == EOL)
+      break; // End of list
+
+    unsigned int optlen = *cp++;
+    if(optlen & 0x80){
+      // length is >= 128 bytes; fetch actual length from next N bytes, where N is low 7 bits of optlen
+      int length_of_length = optlen & 0x7f;
+      optlen = 0;
+      while(length_of_length > 0){
+        optlen <<= 8;
+        optlen |= *cp++;
+        length_of_length--;
+      }
+    }
+    if(cp - buffer + optlen >= length)
+      break; // Invalid length
+
+    switch(type){
+    case EOL: // Shouldn't get here
+      goto done;
+
+    case STATUS_DEST_SOCKET:
+    {
+      if (NULL == radio_mcast_group){
+        struct sockaddr_storage sock;
+        radio_mcast_group = strdup(formatsock(decode_socket(&sock,cp,optlen),true));
+        fprintf(stderr,"radio mcast_group: %s\n",radio_mcast_group);
+
+        char iface[1024];
+        struct sockaddr Metadata_dest_socket;
+
+        resolve_mcast(radio_mcast_group,&Metadata_dest_socket,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
+        Control_fd = connect_mcast(&Metadata_dest_socket,iface,1,48);
+        if(Control_fd < 0){
+          fprintf(stderr,"Control connection failed!\n");
+        } else {
+          fprintf(stderr,"Control connection ok\n");
+        }
+      }
+      break;
+    }
+
+    default:
+      break;
+    }
+    cp += optlen;
+  }
+  done:
+}
+
 static void gen_locals(struct channel *channel){
   Local.noise_bandwidth = fabsf(channel->filter.max_IF - channel->filter.min_IF);
   Local.sig_power = channel->sig.bb_power - Local.noise_bandwidth * channel->sig.n0;
@@ -1396,6 +1442,10 @@ static void input_loop(){
       struct frontend frontend;
       memset(&frontend,0,sizeof(frontend));
       decode_radio_status(&frontend,&chan,buffer+1,length-1);
+
+      if (NULL == radio_mcast_group){
+        extract_source(buffer+1,length-1);
+      }
 
       if ((sync_ssrc) && (chan.output.rtp.ssrc == sync_ssrc)){
         // status packet for the BPSK sync channel, so calc SNR stats
