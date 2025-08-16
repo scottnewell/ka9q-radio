@@ -781,8 +781,9 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
       sp->max_drops = d;
   }
 
+  int framesize = sp->channels * (sp->encoding == F32LE ? 4 : 2); // bytes per sample time
   uint32_t packet_start_ts = sp->rtp_state.timestamp;
-  uint32_t packet_stop_ts = packet_start_ts + (buffer_size / 8);      // assuming 2 channel IQ file with 32 bit floats
+  uint32_t packet_stop_ts = packet_start_ts + (buffer_size / framesize);
    
   if ((0 != sync_ssrc) && (sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
     // PPS sync mode
@@ -814,6 +815,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         sync_start_ts = packet_start_ts;
       }
     } else {
+      /* fprintf(stderr,"ssrc %u armed start ts: %u packet %u - %u!\n",sp->ssrc,sync_start_ts,packet_start_ts,packet_stop_ts); */
       // PPS sync mode, only start when the PPS is in this datagram
       if ((sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
         start=true;
@@ -829,6 +831,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         sp->wd_file_time.tv_sec = 0;
         sp->start_sequence = sp->rtp_state.seq;
         sp->start_timesnap = calculated_starting_timesnap(sp,sync_start_ts);
+        sp->start_ts = sync_start_ts;
         session_file_init(sp,sender);
         sp->sync_state = sync_state_active;
 
@@ -845,8 +848,8 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         uint32_t frame_offset = sync_start_ts - packet_start_ts;
         /* printf("buffer at %p (%lu), length %u -- ",samples,(unsigned long int)samples,buffer_size); */
         float * new_samples = (float*) samples;
-        new_samples += (frame_offset * 2);
-        buffer_size -= (frame_offset * 2 * 4);
+        new_samples += (frame_offset * sp->channels);
+        buffer_size -= (frame_offset * framesize);
         /* printf("buffer at %p (%lu), length %u\n",new_samples,(unsigned long int)new_samples,buffer_size); */
         sp->start_ts = sp->rtp_state.timestamp + frame_offset;
         wd_log(0,"SSRC %u set start ts to %u (RTP TS %u, partial %u) wd_state_machine()\n",
@@ -889,6 +892,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
     // last time through the file was complete, so start a new one
     sp->start_sequence = sp->rtp_state.seq;
     sp->start_timesnap = calculated_starting_timesnap(sp,sp->rtp_state.timestamp);
+    sp->start_ts = sp->rtp_state.timestamp;
     session_file_init(sp,sender);
     sp->sync_state = sync_state_active;
 
@@ -934,6 +938,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
       sp->wd_file_time.tv_sec = 0;
       sp->start_sequence = sp->rtp_state.seq;
       sp->start_timesnap = calculated_starting_timesnap(sp,sp->rtp_state.timestamp);
+      sp->start_ts = sp->rtp_state.timestamp;
       session_file_init(sp,sender);
       sp->sync_state = sync_state_active;
 
@@ -987,6 +992,8 @@ static void fix_mode(struct session * const sp){
     encode_int(&bp,OUTPUT_ENCODING,F32LE);
     encode_float(&bp,GAIN,0);
     encode_int(&bp,AGC_ENABLE,false); // Turn off AGC for manual gain
+    /* encode_float(&bp,LOW_EDGE,-sp->samprate + 50); */
+    /* encode_float(&bp,HIGH_EDGE,sp->samprate - 50); */
     encode_eol(&bp);
     int command_len = bp - cmdbuffer;
 
@@ -1017,6 +1024,9 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
       fix_mode(sp);
       return;
     } else {
+      if (wrong_mode_warning){
+        fprintf(stderr,"SSRC %u mode/encoding/channels now fixed\n",sp->ssrc);
+      }
       wrong_mode_warning = false;
     }
   }
@@ -1053,7 +1063,7 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
 
       /* if ((ts - sp->last_edge) > ((sp->samprate * 101) / 100)) */
       /*   noisy = true; */
-      printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time);
+//      printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time);
 //      printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n");
 
       if (noisy){
@@ -2013,6 +2023,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   attrprintf(fd,"multicast","%s",PCM_mcast_address_text);
   attrprintf(fd,"unixstarttime","%ld.%09ld",(long)now.tv_sec,(long)now.tv_nsec);
 
+  attrprintf(fd,"Start RTP timestamp","%u",sp->start_ts);
   attrprintf(fd,"Start RTP seq","%u",sp->start_sequence);
   attrprintf(fd,"Start timesnap","%.6f s",1.0e-9 * sp->start_timesnap);
   attrprintf(fd,"Pretrigger","%d",sync_pretrigger);
