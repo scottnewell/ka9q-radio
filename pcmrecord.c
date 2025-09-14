@@ -205,6 +205,7 @@ struct session {
   uint32_t start_ts;
   int64_t start_timesnap;
   uint32_t start_sequence;
+  float last_angle_array[32];
 };
 
 static struct {
@@ -992,8 +993,12 @@ static void fix_mode(struct session * const sp){
     encode_int(&bp,OUTPUT_ENCODING,F32LE);
     encode_float(&bp,GAIN,0);
     encode_int(&bp,AGC_ENABLE,false); // Turn off AGC for manual gain
-    /* encode_float(&bp,LOW_EDGE,-sp->samprate + 50); */
-    /* encode_float(&bp,HIGH_EDGE,sp->samprate - 50); */
+    float low = (-(double)sp->samprate/2) + 50;
+    /* float low = -sp->samprate + 50; */
+    encode_float(&bp,LOW_EDGE, low);
+    float high = (sp->samprate/2) - 50;
+    fprintf(stderr,"SSRC %u, samprate %u: set filter:%.0f to %.0f Hz\n", sp->ssrc, sp->samprate, low, high);
+    encode_float(&bp,HIGH_EDGE,high);
     encode_eol(&bp);
     int command_len = bp - cmdbuffer;
 
@@ -1032,8 +1037,8 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
   }
 
   // don't even bother if SNR is <8 dB or so
-  if (Local.snr < 8)
-    return;
+  /* if (Local.snr < 8) */
+  /*   return; */
 
   struct timespec now;
   clock_gettime(CLOCK_REALTIME,&now);
@@ -1046,10 +1051,10 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
   /*        frames,framesize,buffer_size,buffer_size/sizeof(complex float)); */
 
   for(uint32_t i = 0;i < frames;++i){
+    uint32_t ts = sp->rtp_state.timestamp + i;
     float angle=180.0 * cargf(s[i]) / M_PI;
     float angle_diff=angle - sp->last_angle;
     if ((fabs(angle_diff) > 90.0) && (fabs(angle_diff) < 270)){
-      uint32_t ts = sp->rtp_state.timestamp + i;
       bool noisy = false;
 
       // if the pulse isn't +/- 5 samples from the expect position, modulo sample rate, call it noise
@@ -1063,8 +1068,6 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
 
       /* if ((ts - sp->last_edge) > ((sp->samprate * 101) / 100)) */
       /*   noisy = true; */
-//      printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time);
-//      printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n");
 
       if (noisy){
         ++pps_noise;
@@ -1074,7 +1077,10 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
         ++pps_consecutive;
       }
 
-      // check if this PPS edge is +/- 0.4 seconds from top of minute -1 second, to arm the wsprdaemon sync start thing
+      printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld %6u %6u\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time,pps_ok,pps_noise);
+     /* printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n"); */
+
+     // check if this PPS edge is +/- 0.4 seconds from top of minute -1 second, to arm the wsprdaemon sync start thing
       struct timespec expected_start = now;
       expected_start.tv_nsec = 0;
       expected_start.tv_sec += (time_t)(FileLengthLimit / 2);
@@ -1101,6 +1107,17 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
       sp->last_edge=ts;
     }
     sp->last_angle=angle;
+
+    angle_diff = fabs(angle - sp->last_angle_array[ts %32]);
+    /* if ((angle_diff > 90.0) && (angle_diff < 270.0)){ */
+    /*   printf("SSRC %u:%2u phase %6.2f degrees detected at ts %u (%u)\n", */
+    /*          sp->ssrc, */
+    /*          ts % 32, */
+    /*          angle_diff, */
+    /*          ts, */
+    /*          ts % sp->samprate); */
+    /* } */
+    sp->last_angle_array[ts % 32] = angle;
   }
 
 /* static struct { */
@@ -1620,6 +1637,10 @@ static void input_loop(){
       }
 
       if (wd_mode){
+        /* static int dc=0; */
+        /* if (! (++dc % 100)){ */
+        /*   printf("wd_mode(): SSRC %u\n",sp->ssrc); */
+        /* } */
 	sp->rtp_state.seq = rtp.seq;
 	sp->rtp_state.timestamp = rtp.timestamp;
         if(sp->encoding == S16BE){
