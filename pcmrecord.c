@@ -243,6 +243,7 @@ static bool sync_record = false;
 static uint32_t sync_start_ts;
 static int32_t sync_pretrigger;
 static char* radio_mcast_group = NULL;
+static bool no_output = false;
 
 const char *App_path;
 static int Input_fd,Status_fd,Control_fd;
@@ -293,6 +294,7 @@ static struct option Options[] = {
   {"sync-frequency", required_argument, NULL, 1002},
   {"sync-record", no_argument, NULL, 1003},
   {"sync-pretrigger", required_argument, NULL, 1004},
+  {"no-output", no_argument, NULL, 1005},
   {"version", no_argument, NULL, 'V'},
   {"max_length", required_argument, NULL, 'x'},
   {"wd_mode", no_argument, NULL, 'W'},
@@ -423,6 +425,9 @@ int main(int argc,char *argv[]){
           sync_pretrigger = x;
       }
       fprintf(stderr,"bpsk pretrigger at %d samples\n",sync_pretrigger);
+      break;
+    case 1005:
+      no_output = true;
       break;
     default:
       fprintf(stderr,"Usage: %s [-c|--catmode|--stdout] [-r|--raw] [-e|--exec command] [-f|--flush] [-s] [-d directory] [-l locale] [-L maxtime] [-t timeout] [-j|--jt] [-v] [-m sec] [-x|--max_length max_file_time, no sync, oneshot] [--wd_mode|-W] PCM_multicast_address\n",argv[0]);
@@ -615,7 +620,7 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
     expected_start.tv_sec *= (time_t)(FileLengthLimit);
 
     if (fabs(time_diff(expected_start,now)) >= wd_tolerance_seconds){
-      wd_log(0,"First sample %.3f s off...resync at next interval on SSRC %d (tx %u, rx %u, drops %u)\n",
+      wd_log(1,"First sample %.3f s off...resync at next interval on SSRC %d (tx %u, rx %u, drops %u)\n",
              time_diff(expected_start,now),
              sp->ssrc,
              sp->max_tx_queue,
@@ -628,7 +633,7 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
 
   int partial_frames = frames;
   if (partial_frames > sp->samples_remaining){
-     wd_log(0,"SSRC %u Too many frames in this packet! %ld remain, %u this packet\n",
+     wd_log(1,"SSRC %u Too many frames in this packet! %ld remain, %u this packet\n",
 	    sp->ssrc,
 	    sp->samples_remaining,
 	    partial_frames);
@@ -645,7 +650,7 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
 
   // if we wrote a partial, finish up in the new file
   if (partial_frames < frames){
-    wd_log(0,"SSRC %u frames: %d partial %d samples %p %ld new samples %p %ld\n",
+    wd_log(1,"SSRC %u frames: %d partial %d samples %p %ld new samples %p %ld\n",
            sp->ssrc,
            frames,
            partial_frames,
@@ -661,7 +666,7 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
     sp->start_timesnap = calculated_starting_timesnap(sp,sp->start_ts);
     session_file_init(sp,&sp->sender);
     sp->sync_state = sync_state_active;
-    wd_log(0,"SSRC %u set start ts to %u (RTP TS %u, partial %u) wd_write()\n",
+    wd_log(1,"SSRC %u set start ts to %u (RTP TS %u, partial %u) wd_write()\n",
            sp->ssrc,
            sp->start_ts,
            sp->rtp_state.timestamp,
@@ -676,12 +681,12 @@ static int wd_write(struct session * const sp,void *samples,int buffer_size,stru
 
     start_wav_stream(sp);
     sp->file_time = now;
-    wd_log(0,"SSRC %u starting in the middle of a packet. partial_frames = %d, frames = %d, samples = %p (%ld)\n",
+    wd_log(1,"SSRC %u starting in the middle of a packet. partial_frames = %d, frames = %d, samples = %p (%ld)\n",
            sp->ssrc,
            partial_frames,frames,samples,(long int)samples);
     samples = (void*)((float*) samples + (partial_frames * sp->channels));
     partial_frames = frames - partial_frames;
-    wd_log(0,"SSRC %u Starting in the middle of a packet. partial_frames = %d, frames = %d, samples = %p (%ld)\n",
+    wd_log(1,"SSRC %u Starting in the middle of a packet. partial_frames = %d, frames = %d, samples = %p (%ld)\n",
            sp->ssrc,
            partial_frames,
            frames,samples,
@@ -968,7 +973,8 @@ void log_printf(const char* format, ...){
   char* buff;
   if (vasprintf(&buff, format, args)>=0)
   {
-    syslog(LOG_INFO, "%s", buff);
+    /* syslog(LOG_INFO, "%s", buff); */
+    fprintf(stderr,"%s\n",buff);
     free(buff);
   }
   va_end(args);
@@ -1010,7 +1016,7 @@ static void fix_mode(struct session * const sp){
   }
 }
 
-static void bpsk_state_machine(struct session * const sp,struct sockaddr const */*sender*/,void *samples,int buffer_size,int64_t sender_time){
+static void bpsk_state_machine(struct session * const sp,struct sockaddr const */*sender*/,void *samples,int buffer_size,int64_t /*sender_time*/){
   if (NULL == sp){
     return;
   }
@@ -1049,7 +1055,9 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
   float complex* s=(float complex*)samples;
   /* wd_log(0,"%d frames of %d bytes each, size: %d, IQ samples: %lu\n", */
   /*        frames,framesize,buffer_size,buffer_size/sizeof(complex float)); */
-
+  float min_error = 9e99;
+  float best_angle;
+  uint32_t best_fit = 0;
   for(uint32_t i = 0;i < frames;++i){
     uint32_t ts = sp->rtp_state.timestamp + i;
     float angle=180.0 * cargf(s[i]) / M_PI;
@@ -1077,7 +1085,7 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
         ++pps_consecutive;
       }
 
-      printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld %6u %6u\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time,pps_ok,pps_noise);
+      /* printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld %6u %6u\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time,pps_ok,pps_noise); */
      /* printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n"); */
 
      // check if this PPS edge is +/- 0.4 seconds from top of minute -1 second, to arm the wsprdaemon sync start thing
@@ -1091,13 +1099,13 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
       if (fabs(time_diff(expected_start,now)) < 0.4){
         sync_start_ts = ts + sp->samprate;
         sync_start_ts += sync_pretrigger;
-        log_printf("SSRC %u PPS ok: %u PPS noise: %u consecutive ok: %u sync at TS %u",
-                   sp->ssrc,
-                   pps_ok,
-                   pps_noise,
-                   pps_consecutive,
-                   sync_start_ts);
-        wd_log(0,"SSRC %u sync start at next PPS (RTP ts %u)? Time delta: %.3f s\n",
+        /* log_printf("SSRC %u PPS ok: %u PPS noise: %u consecutive ok: %u sync at TS %u", */
+        /*            sp->ssrc, */
+        /*            pps_ok, */
+        /*            pps_noise, */
+        /*            pps_consecutive, */
+        /*            sync_start_ts); */
+        wd_log(1,"SSRC %u sync start at next PPS (RTP ts %u)? Time delta: %.3f s\n",
                sp->ssrc,
                sync_start_ts,
                time_diff(now,expected_start));
@@ -1108,17 +1116,34 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
     }
     sp->last_angle=angle;
 
-    angle_diff = fabs(angle - sp->last_angle_array[ts %32]);
-    /* if ((angle_diff > 90.0) && (angle_diff < 270.0)){ */
-    /*   printf("SSRC %u:%2u phase %6.2f degrees detected at ts %u (%u)\n", */
-    /*          sp->ssrc, */
-    /*          ts % 32, */
-    /*          angle_diff, */
-    /*          ts, */
-    /*          ts % sp->samprate); */
-    /* } */
+    angle_diff = fabs(angle - sp->last_angle_array[ts % 32]);
+
+    if ((angle_diff > 160.0) && (angle_diff < 200.0)){
+      float error = fabs(angle_diff - 180.0);
+      if (error < min_error){
+        min_error = error;
+        best_fit = ts;
+        best_angle = angle_diff;
+        /* fprintf(stderr,"SSRC %u:%2u phase %6.2f degrees detected at ts %u (%u)\n", */
+        /*         sp->ssrc, */
+        /*         best_fit % 32, */
+        /*         best_angle, */
+        /*         best_fit, */
+        /*         best_fit % sp->samprate); */
+      }
+    }
     sp->last_angle_array[ts % 32] = angle;
   }
+
+  if (best_fit > 0){
+      fprintf(stderr," SSRC %u:%2u phase %6.2f degrees detected at ts %u (%u)\n",
+              sp->ssrc,
+              best_fit % 32,
+              best_angle,
+              best_fit,
+              best_fit % sp->samprate);
+  }
+
 
 /* static struct { */
 /*   float noise_bandwidth; */
@@ -1635,6 +1660,9 @@ static void input_loop(){
         if (!sync_record)
           goto datadone;
       }
+
+      if (no_output)
+        goto datadone;
 
       if (wd_mode){
         /* static int dc=0; */
