@@ -205,7 +205,6 @@ struct session {
   uint32_t start_ts;
   int64_t start_timesnap;
   uint32_t start_sequence;
-  float last_angle_array[32];
 };
 
 static struct {
@@ -371,7 +370,7 @@ int main(int argc,char *argv[]){
       break;
     case 'V':
       VERSION();
-      fputs("wsprdaemon mode (-W): v0.11_sync\n",stdout);
+      fputs("wsprdaemon mode (-W): v0.12_sync\n",stdout);
       exit(EX_OK);
     case 'W':
       wd_mode = true;
@@ -793,7 +792,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
    
   if ((0 != sync_ssrc) && (sync_start_ts >= packet_start_ts) && (sync_start_ts < packet_stop_ts)){
     // PPS sync mode
-    wd_log(0,"SSRC %u sync start at RTP ts %u: this packet is %u - %u\n",
+    wd_log(1,"SSRC %u sync start at RTP ts %u: this packet is %u - %u\n",
            sp->ssrc,
            sync_start_ts,
            packet_start_ts,
@@ -858,7 +857,7 @@ static void wd_state_machine(struct session * const sp,struct sockaddr const *se
         buffer_size -= (frame_offset * framesize);
         /* printf("buffer at %p (%lu), length %u\n",new_samples,(unsigned long int)new_samples,buffer_size); */
         sp->start_ts = sp->rtp_state.timestamp + frame_offset;
-        wd_log(0,"SSRC %u set start ts to %u (RTP TS %u, partial %u) wd_state_machine()\n",
+        wd_log(1,"SSRC %u set start ts to %u (RTP TS %u, partial %u) wd_state_machine()\n",
                sp->ssrc,
                sp->start_ts,
                sp->rtp_state.timestamp,
@@ -973,8 +972,7 @@ void log_printf(const char* format, ...){
   char* buff;
   if (vasprintf(&buff, format, args)>=0)
   {
-    /* syslog(LOG_INFO, "%s", buff); */
-    fprintf(stderr,"%s\n",buff);
+    syslog(LOG_INFO, "%s", buff);
     free(buff);
   }
   va_end(args);
@@ -1055,9 +1053,7 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
   float complex* s=(float complex*)samples;
   /* wd_log(0,"%d frames of %d bytes each, size: %d, IQ samples: %lu\n", */
   /*        frames,framesize,buffer_size,buffer_size/sizeof(complex float)); */
-  float min_error = 9e99;
-  float best_angle;
-  uint32_t best_fit = 0;
+
   for(uint32_t i = 0;i < frames;++i){
     uint32_t ts = sp->rtp_state.timestamp + i;
     float angle=180.0 * cargf(s[i]) / M_PI;
@@ -1065,7 +1061,7 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
     if ((fabs(angle_diff) > 90.0) && (fabs(angle_diff) < 270)){
       bool noisy = false;
 
-      // if the pulse isn't +/- 5 samples from the expect position, modulo sample rate, call it noise
+      // if the pulse isn't +/- 5 samples from the expected position, modulo sample rate, call it noise
       int32_t delta = (ts % sp->samprate) - (sp->last_edge % sp->samprate);
       if (abs(delta) > 10)
         noisy=true;
@@ -1086,9 +1082,9 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
       }
 
       /* printf("%s%ld %8u %.0f Hz %10u %6u %6d %8u %+6.1f %+6.1f %3.1f dB %6u %s %ld %6u %6u\n",wd_time(),now.tv_sec,sp->ssrc,sp->chan.tune.freq,ts,ts % sp->samprate,delta,ts / sp->samprate,angle,angle-sp->last_angle,Local.snr,ts - sp->last_edge,noisy?"noise?!":"",sender_time,pps_ok,pps_noise); */
-     /* printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n"); */
+      /* printf("Time                                         SSRC     Freq        RTP TS       Offset       Seconds Phase  Diff   SNR     Delta\n"); */
 
-     // check if this PPS edge is +/- 0.4 seconds from top of minute -1 second, to arm the wsprdaemon sync start thing
+      // check if this PPS edge is +/- 0.4 seconds from top of minute -1 second, to arm the wsprdaemon sync start thing
       struct timespec expected_start = now;
       expected_start.tv_nsec = 0;
       expected_start.tv_sec += (time_t)(FileLengthLimit / 2);
@@ -1099,61 +1095,23 @@ static void bpsk_state_machine(struct session * const sp,struct sockaddr const *
       if (fabs(time_diff(expected_start,now)) < 0.4){
         sync_start_ts = ts + sp->samprate;
         sync_start_ts += sync_pretrigger;
-        /* log_printf("SSRC %u PPS ok: %u PPS noise: %u consecutive ok: %u sync at TS %u", */
-        /*            sp->ssrc, */
-        /*            pps_ok, */
-        /*            pps_noise, */
-        /*            pps_consecutive, */
-        /*            sync_start_ts); */
+        log_printf("SSRC %u PPS ok: %u PPS noise: %u consecutive ok: %u sync at TS %u",
+                   sp->ssrc,
+                   pps_ok,
+                   pps_noise,
+                   pps_consecutive,
+                   sync_start_ts);
         wd_log(1,"SSRC %u sync start at next PPS (RTP ts %u)? Time delta: %.3f s\n",
                sp->ssrc,
                sync_start_ts,
                time_diff(now,expected_start));
       }
-      
+
       fflush(0);
       sp->last_edge=ts;
     }
     sp->last_angle=angle;
-
-    angle_diff = fabs(angle - sp->last_angle_array[ts % 32]);
-
-    if ((angle_diff > 160.0) && (angle_diff < 200.0)){
-      float error = fabs(angle_diff - 180.0);
-      if (error < min_error){
-        min_error = error;
-        best_fit = ts;
-        best_angle = angle_diff;
-        /* fprintf(stderr,"SSRC %u:%2u phase %6.2f degrees detected at ts %u (%u)\n", */
-        /*         sp->ssrc, */
-        /*         best_fit % 32, */
-        /*         best_angle, */
-        /*         best_fit, */
-        /*         best_fit % sp->samprate); */
-      }
-    }
-    sp->last_angle_array[ts % 32] = angle;
   }
-
-  if (best_fit > 0){
-      fprintf(stderr," SSRC %u:%2u phase %6.2f degrees detected at ts %u (%u)\n",
-              sp->ssrc,
-              best_fit % 32,
-              best_angle,
-              best_fit,
-              best_fit % sp->samprate);
-  }
-
-
-/* static struct { */
-/*   float noise_bandwidth; */
-/*   float sig_power; */
-/*   float sn0; */
-/*   float snr; */
-/*   int64_t pll_start_time; */
-/*   double pll_start_phase; */
-/* } Local; */
-
 }
 
 static void closedown(int a){
