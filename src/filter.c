@@ -723,7 +723,7 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
     // I think this is maybe also a dropped block?!
     weird_drop_count = master->completed_jobs[slave->next_jobnum % ND] - slave->next_jobnum;
     weird_drop = true;
-    slave->block_drops += (weird_drop_count * 10000);
+    slave->block_drops += weird_drop_count;
   }
 
   // in case we just waited so long that the buffer wrapped, resynch
@@ -750,7 +750,6 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
             this_jobs[3],
             current_jobnum,
             slave->next_jobnum);
-    fflush(stderr);
   }
   last_thread_ns = thread_ns;
   for(int i = 0; i < ND; i++){

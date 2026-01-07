@@ -24,6 +24,8 @@
 #include "filter.h"
 #include "radio.h"
 
+static __thread unsigned last_dropped_blocks;
+
 int demod_linear(void *arg){
   struct channel * const chan = arg;
   assert(chan != NULL);
@@ -332,6 +334,19 @@ int demod_linear(void *arg){
     // or if zero frequency
     // or if squelch is closed
     bool const mute = output_power == 0 || !squelch_open || chan->tune.freq == 0;
+
+
+    // N5TNL: adjust RTP TS based on current jobnum so that dropped blocks don't confuse me
+    if (chan->frontend->L != 0){
+      double const block_rate = chan->frontend->samprate / chan->frontend->L;
+      uint32_t const first_block = chan->filter.out.next_jobnum - 1;
+      chan->output.rtp.timestamp = (int32_t)(first_block * (chan->output.samprate / block_rate));
+      if (chan->filter.out.block_drops != last_dropped_blocks){
+	fprintf(stderr,"demod_linear(): ssrc %u drops %u jobum %u, set RTP TS to %u\n",chan->output.rtp.ssrc,chan->filter.out.block_drops,first_block,chan->output.rtp.timestamp);
+      }
+    }
+    last_dropped_blocks = chan->filter.out.block_drops;
+
 
     // send_output() knows if the buffer is mono or stereo
     if(send_output(chan,(float *)buffer,N,mute) == -1)
