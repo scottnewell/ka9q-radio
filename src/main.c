@@ -46,6 +46,12 @@ int main(int argc,char *argv[]){
   App_path = argv[0];
 
   VERSION();
+  fprintf(stderr, " Commit: %s\n", GIT_HASH);
+  fprintf(stderr, "   Date: %s\n", GIT_TIME);
+  fprintf(stderr, " Branch:  %s\n", GIT_BRANCH);
+  fprintf(stderr, "Version: %s\n", GIT_VERSION);
+  fprintf(stderr, "Summary: %s\n", GIT_SUMMARY);
+
 #ifndef NDEBUG
   fprintf(stderr,"Assertion checking enabled, execution will be slower\n");
 #endif
