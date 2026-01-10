@@ -655,6 +655,11 @@ int execute_filter_input(struct filter_in * const f){
   return 0;
 }
 
+static __thread int64_t last_thread_ns;
+static __thread unsigned int last_jobs[ND];
+static __thread unsigned int this_jobs[ND];
+static __thread unsigned int last_jobnum;
+
 /* Execute the output side of a filter:
    1 - wait for a forward FFT job to complete
    frequency domain data is in a circular queue ND buffers deep to tolerate scheduling jitter
@@ -687,6 +692,8 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
   // DC and positive frequencies up to nyquist frequency are same for all types
   assert(slave->out_type == SPECTRUM || malloc_usable_size(slave->fdomain) >= slave->bins * sizeof(*slave->fdomain));
 
+  bool weird_drop = false;
+
   // Wait for new block of output data
   pthread_mutex_lock(&master->filter_mutex);
   int blocks_behind = master->completed_jobs[slave->next_jobnum % ND] - slave->next_jobnum;
@@ -699,14 +706,57 @@ int execute_filter_output(struct filter_out * const slave,int const shift){
     }
     slave->block_drops += nextblock - slave->next_jobnum;
     slave->next_jobnum = nextblock;
+    weird_drop = true;
   }
   while((int)(slave->next_jobnum - master->completed_jobs[slave->next_jobnum % ND]) > 0)
     pthread_cond_wait(&master->filter_cond,&master->filter_mutex);
   // We don't modify the master's output data, we create our own
   float complex const * const fdomain = master->fdomain[slave->next_jobnum % ND];
+
+  unsigned int current_jobnum = master->completed_jobs[slave->next_jobnum % ND];
+
+  for(int i = 0; i < ND; i++){
+    this_jobs[i] = master->completed_jobs[i];
+  }
+
+  int weird_drop_count = 0;
+  if (slave->next_jobnum != master->completed_jobs[slave->next_jobnum % ND]){
+    // I think this is maybe also a dropped block?!
+    weird_drop_count = master->completed_jobs[slave->next_jobnum % ND] - slave->next_jobnum;
+    weird_drop = true;
+    slave->block_drops += weird_drop_count;
+  }
+
   // in case we just waited so long that the buffer wrapped, resynch
   slave->next_jobnum = master->completed_jobs[slave->next_jobnum % ND] + 1;
   pthread_mutex_unlock(&master->filter_mutex);
+
+  int64_t thread_ns = gps_time_ns();
+  if (weird_drop){
+    char name[16];
+    pthread_getname_np(pthread_self(), name, 16);
+    fprintf(stderr,"N5TNL %s d %d w %d stall %.3f ms prev [%u %u %u %u] %u this [%u %u %u %u] %u next %u\n",
+            name,
+            slave->block_drops,
+            weird_drop_count,
+            0.001 * 0.001 * (thread_ns - last_thread_ns),
+            last_jobs[0],
+            last_jobs[1],
+            last_jobs[2],
+            last_jobs[3],
+            last_jobnum,
+            this_jobs[0],
+            this_jobs[1],
+            this_jobs[2],
+            this_jobs[3],
+            current_jobnum,
+            slave->next_jobnum);
+  }
+  last_thread_ns = thread_ns;
+  for(int i = 0; i < ND; i++){
+    last_jobs[i] = this_jobs[i];
+  }
+  last_jobnum = current_jobnum;
 
   assert(fdomain != NULL); // Should always be master frequency data
 
