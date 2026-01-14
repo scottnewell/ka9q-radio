@@ -293,7 +293,7 @@ int demod_linear(void *arg){
     if (chan->frontend->L != 0){
       double const block_rate = chan->frontend->samprate / chan->frontend->L;
       uint32_t const first_block = chan->filter.out.next_jobnum - 1;
-      chan->output.rtp.timestamp = (int32_t)(first_block * (chan->output.samprate / block_rate));
+      chan->output.rtp.timestamp = (uint32_t)(first_block * (chan->output.samprate / block_rate));
       if (chan->filter.out.block_drops != last_dropped_blocks){
 	fprintf(stderr,"demod_linear(): ssrc %u drops %u jobum %u, set RTP TS to %u\n",chan->output.rtp.ssrc,chan->filter.out.block_drops,first_block,chan->output.rtp.timestamp);
       }
