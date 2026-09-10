@@ -1,0 +1,47 @@
+# systemd unit for radio receiver
+# this is the OLD method involving a manually enabled service unit for each device
+# Phil Karn, KA9Q, Sept 2025
+
+[Unit]
+Description=%i radio receiver
+Wants=lan.target
+After=lan.target
+CollectMode=inactive-or-failed
+
+[Service]
+User=radio
+Group=radio
+Type=simple
+Nice=-10
+SupplementaryGroups=plugdev radio users
+CapabilityBoundingSet=CAP_SYS_NICE CAP_NET_ADMIN
+AmbientCapabilities=CAP_SYS_NICE CAP_NET_ADMIN
+StateDirectory=ka9q-radio
+StateDirectoryMode=0775
+LogsDirectory=ka9q-radio
+LogsDirectoryMode=0775
+UMask=002
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=no
+ExecStart=@sbindir@/radiod -N %i /etc/radio/radiod@%i.conf
+# eventually it will be Restart=on-failure after udev-triggered
+# starting is implemented
+# things are also complicated by rx888s with watchdogs
+Restart=always
+RestartSec=5
+TimeoutStopSec=5
+SyslogIdentifier=radiod@%i
+LogRateLimitBurst=500
+LogRateLimitIntervalSec=20
+#RestartPreventExitStatus=66
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,4 @@
+# ka9q-radio-recordings.install
+etc/logrotate.d/recordings.rotate
+usr/share/ka9q-radio/examples/recordings@*
+usr/lib/systemd/system/recordings@.service

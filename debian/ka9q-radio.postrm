@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+. /usr/share/debconf/confmodule
+
+case "$1" in
+  purge)
+    db_purge
+    ;;
+esac
+
+#DEBHELPER#
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi

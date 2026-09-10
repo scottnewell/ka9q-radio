@@ -11,9 +11,11 @@ Right arrow  Move cursor right one digit
 Up arrow     Increase by 1
 Down arrow   Decrease by 1
 ctl+L        Redraw screen
+a    Set FFT analyzer averaging in frames (>= 1)
 A    Set front end (RF) attenuation, dB
 b    Set Opus audio codec bit rate, b/s (0 = auto)
 B    Set output packet buffering 0-4 frames
+D    Set output socket
 e    Set output encoding (s16le, s16be, f32le, f16le, opus)
 f    Set frequency (eg: 147m435, 10m0, 760k0, 14313000)
 F    Set frames in filter2 block (0-4: 0 = disable filter2)
@@ -32,4 +34,7 @@ R    Set AGC recover rate, dB/s
 s    Set squelch, dB
 S    Set sample rate, Hz
 T    Set AGC hang time, s
+t    Set lifetime, frames (0 = immortal)
 u    Set output status update interval, frames
+v    Set FFT analyzer overlap (0-1)
+W    Set FFT analyzer window type

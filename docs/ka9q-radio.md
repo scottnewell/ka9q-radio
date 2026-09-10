@@ -24,76 +24,14 @@ someday.  It's intended for applications that need many channels at
 once. It would also make an excellent foundation for a web SDR able to
 support many (hundreds) of simultaneous users. So far we've used it
 for specialized applications like APRS gatewaying, repeater monitoring
-and recording, multiband WSPR and FT8 skimming, propagation research,
-and radiosonde reception that all use its multichannel capabilities.
+and recording, HFDL reception, multiband WSPR and FT4/8 skimming, propagation research,
+and 400 MHz radiosonde reception that all use its multichannel capabilities.
 
 The original version of *ka9q-radio* had a separate front end handler,
 e.g., *funcubed* or *airspyd*, from the main radio daemon *radiod*.
 In August 2023 I merged the front end handlers into *radiod*,
 improving performance and simplifying configuration considerably. This
 document only discusses this new version.
-
-The *radiod* Daemon
--------------------
-
-What follows assumes some knowledge of common Linux commands and
-system administration, particularly configuring, starting and stopping
-daemons running under the standard Linux system management daemon
-*systemd*. *ka9q-radio* uses Linux conventions as much as possible.
-
-The core of *ka9q-radio* is the radio daemon, *radiod*. Like all
-daemons, *radiod* automatically runs in the background.  Users
-talk to it only over the network with the client programs
-*control* and *monitor* (if at all - most *ka9q-radio* applications
-are completely automatic once configured).
-
-Several instances of *radiod* may run at the same time, subject to
-resource limits (USB, Ethernet and CPU capacity).  Front ends cannot
-be shared between *radiod* instances, and each instance can only
-handle one front end. 
-
-Running "make install" in the *ka9q-radio* source
-directory creates **/usr/local/sbin/radiod** and the *systemd*
-service file **/etc/systemd/systemd/radiod@.service**.
-*systemd* replaces the '@' character in a
-running instance with the instance name. This file usually need not be modified.
-
-*radiod* reads its
-configuration from **/etc/radio/radiod@foo.conf**, where **foo** is the instance
-name. You should pick a meaningful or descriptive instance name, e.g,
-**hf**.  Note that **.conf** is *not* part of the
-instance name; it's a common error to start "radiod@hf.conf" when you
-mean "radiod@hf".
-
-The main **systemctl** commands for controlling *radiod* (or any other
-**systemd** service with multiple instances) are:
-
-$ sudo systemctl start radiod@foo  
-$ sudo systemctl stop radiod@foo  
-$ sudo systemct restart radiod@foo  
-$ sudo systemct enable radiod@foo  
-$ sudo systemct disable radiod@foo  
-$ systemctl status radiod@foo  
-
-The first two commands immediately start and stop *radiod*. "systemctl restart"
-is equivalent to a **systemctl stop** immediately followed by a
-**systemctl start**. The **enable** and **disable** commands have no immediate effect;
-they configure *systemd* to start *radiod* after a boot, or to
-prevent that from happening.  It does this by creating or deleting a
-symbolic link in
-**/etc/systemd/system/multi-user.target.wants**. Again, this is
-standard Linux stuff.
-
-Like most system daemons, *radiod* writes startup and error messages
-to the standard system log, */var/log/syslog*. You can read this
-file directly (e.g., with **grep** or **tail**) or through the
-**systemctl status** command.
-
-You do not have to be root to run **systemctl status** but you usually
-have to be root or a member of group "adm" to read /var/log/syslog.
-Note that **systemctl status** only gives you the last 10 lines of output
-from *radiod*.
-
 
 The *radiod* Configuration File
 -------------------------------
@@ -138,6 +76,10 @@ deterministically hashed to generate and advertise an IPv4
 multicast address in the site local 239.0.0.0/8 block, along with a SRV DNS
 record of type _ka9q-ctl._udp with this name.
 
+This parameter cannot specify a unicast IP address, though periodic
+status transmissions are also sent on each active data channel every 500 ms,
+and that can use a unicast destination.
+
 ### iface = (no default, optional)
 
 Many computers, including most recent Raspberry Pis have
@@ -153,6 +95,25 @@ This option gives the interface name of the local Ethernet device to
 be used for all status/control and data traffic.  Don't set this
 unless you really need to.
 
+When **ttl = 0** (the default) the internal loopback interface is used automatically;
+it need not be specified here
+
+### dns = (optional, default off)
+
+Set the global default for whether to use the Domain Name System (DNS) to resolve domain names in the *data* and *status*
+fields.
+The default (off) causes **radiod** to publish the specified name in the '.local' multicast DNS zone
+along with an IPv4 multicast address in the 239.0.0.0/8 block generated from the
+name by a deterministic hash.
+
+Setting **dns = on** causes **radiod** to instead query
+the domain name system for an existing name (by default, in the .local zone)
+and use the resulting IP address. This is primarily intended
+for sending an output stream to a regular (unicast) IP address, though the DNS entry
+may point to a preset multicast address. IPv6 is not yet supported.
+
+The **dns** parameter can be overridden in individual channel definitions.
+
 ### data = (no default, optional)
 
 This sets the default domain name of the multicast group for receiver
@@ -162,30 +123,34 @@ set one. A **data =** directive in a channel group overrides this one.
 This option is required to create dynamic channels, otherwise it is optional
 provided that it is specified in each channel group.
 
-*radiod* deterministically hashes the destination string to generate
+When the *dns* option (see above) is off, *radiod* deterministically hashes the destination string to generate
 and advertise an IPv4 multicast address in the site local 239.0.0.0/8 block,
-along with a SRV DNS record of type _rtp._udp advertising this name.
+along with a SRV DNS record of type _rtp._udp or _opus._udp
+advertising this name, depending on the output encoding. _rtp._udp is used for all PCM
+formats.
+
+When the *dns* option is on, the specified name is looked up in the Domain Name System,
+and the corresponding address may be either a multicast or unicast IPv4 address.
 
 A single multicast group can carry many receiver channels, each
 distinguished by its 32-bit RTP SSRC (Real Time Protocol Stream Source
 Identifier), which must be unique for an instance of
 *radiod*. However, consider that Ethernet switches, routers and host
 handle multicast group subscriptions by their IP addresses only, so an
-application (e.g., *pcmcat*) will discard traffic from
+application (e.g., *pcmrecord*) will discard traffic from
 any unwanted SSRCs sharing an IP multicast address with desired
 traffic. At a 24 kHz sample rate, each 16-bit mono PCM stream is 384
 kb/s plus header overhead, so this can add up when many channels are
 active.  This is usually OK on 1Gb/s Ethernet, but it can be a problem
 over slower Ethernets or WiFi, especially where the base station does
 not do multicast-to-unicast conversion. To minimize network bandwidth
-when you're simply listening, use the Opus
-transcoder daemon *opusd*.
+when you're simply listening, use Opus output encoding.
 
 ### mode = (no default, optional)
 
 Sets the default mode to be used for any channel group that doesn't
 specify one. Modes are specified in the file
-*/usr/local/share/ka9q-radio/modes.conf*. They would probably be
+*/usr/local/share/ka9q-radio/presets.conf*. They would probably be
 better called "presets" because a "mode" actually describes a group of
 parameters (demodulator type, filter settings, etc) in that file.
 
@@ -209,10 +174,13 @@ traffic to where it is wanted (and away from WiFi) are strongly recommended. **t
 fine as long as all applications that read status or data
 from *radiod* run on the same physical system.
 
+Note that *ttl* can only be set globally, not in individual demodulator sections.
+
 ### tos = (optional, default 48)
 
 Sets the Internet Protocol Type-of-Service (TOS) field in all outbound traffic.
 There is little reason to change this on a LAN with sufficient capacity.
+This parameter also applies only globally.
 
 ### blocktime = (optional, default 20)
 
@@ -265,6 +233,7 @@ sample rates.
 
 Sets the number of FFT "worker" threads for the forward FFT shared by
 all the receiver channels. The default is usually sufficient except on slow systems.
+A single thread will suffice on fast CPUs, and may reduce overhead.
 
 ### rtcp = (optional, default off)
 
@@ -277,7 +246,7 @@ Enable the Session Announcement Protocol (SAP). Eventually this will
 make receiver streams visible to session browers in applications such
 as VLC. Leave off for now.
 
-### mode-file = (optional, default */usr/local/share/ka9q-radio/modes.conf*)
+### mode-file = (optional, default */usr/local/share/ka9q-radio/presets.conf*)
 
 Specifies the mode description file mentioned in the **mode**
 parameter above. Use the default when possible.

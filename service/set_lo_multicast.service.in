@@ -1,0 +1,15 @@
+[Unit]
+Description=Enable multicast on loopback interface
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+Type=oneshot
+ExecStart=/usr/sbin/ip link set dev lo multicast on
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

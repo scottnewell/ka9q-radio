@@ -1,0 +1,659 @@
+ka9q-radio (2026.09.10-1-trixie1) trixie; urgency=medium
+
+  * commit c29d6b4f22422e409ad187914f856180a84eb6e9
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 09 Sep 2026 20:27:40 -0700
+
+ka9q-radio (2026.09.09-2-trixie1) trixie; urgency=medium
+
+  * commit 8fc3c37170244e4ba560fd55e255283791befe09
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 09 Sep 2026 20:15:29 -0700
+
+ka9q-radio (2026.09.09-1-trixie1) trixie; urgency=medium
+
+  * commit d4a91651f2bee207d44c2c2c7cd49598543767c7
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 09 Sep 2026 12:32:40 -0700
+
+ka9q-radio (2026.09.07-1-trixie2) trixie; urgency=medium
+
+  * commit c8926d13ae00d36d1868ed61d0350443fd16dd33
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 07 Sep 2026 06:08:47 -0700
+
+ka9q-radio (2026.09.07-1-trixie1) trixie; urgency=medium
+
+  * commit 304b852613aedafc34c403e3710cf24b7b0309ad
+  * initial untested version of soapy plugin for radiod
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 07 Sep 2026 06:00:39 -0700
+
+ka9q-radio (2026.09.04-1-trixie1) trixie; urgency=medium
+
+  * commit fe407db52d31043be0d61a83034f8dae3d909b32
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 04 Sep 2026 20:45:03 -0700
+
+ka9q-radio (2026.09.03-1-trixie1) trixie; urgency=medium
+
+  * commit bcbc364371db145502a63dcf92e6461a3f364ef1
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 02 Sep 2026 19:34:37 -0700
+
+ka9q-radio (2026.08.31-2-trixie1) trixie; urgency=medium
+
+  * commit aecd00cbc2b7cd999e86ad4f93d09a9656d4ec62
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 31 Aug 2026 10:34:57 -0700
+
+ka9q-radio (2026.08.31-1-trixie1) trixie; urgency=medium
+
+  * commit ac2ea4df33947fdd6c93c715908276b89cdc4408
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 30 Aug 2026 17:56:16 -0700
+
+ka9q-radio (2026.08.29-2-trixie1) trixie; urgency=medium
+
+  * clean up feature tests for sinpi/cospi
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 29 Aug 2026 11:55:25 -0700
+
+ka9q-radio (2026.08.29-1-trixie1) trixie; urgency=medium
+
+  * commit 41f31df65cdc02c4b8bdd2b83c4ae22e02e59731
+  * fix auto channel creat regression
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 29 Aug 2026 11:34:04 -0700
+
+ka9q-radio (2026.08.26-1-trixie1) trixie; urgency=medium
+
+  * commit 7963ce1514abd6191dc59fc96849697b6617256c
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 25 Aug 2026 19:24:06 -0700
+
+ka9q-radio (2026.08.23-2-trixie1) trixie; urgency=medium
+
+  * commit c0c3cc51e8ee6105e82d183a8fadaa86d940d11f
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 23 Aug 2026 16:55:45 -0700
+
+ka9q-radio (2026.08.23-1-trixie1) trixie; urgency=medium
+
+  * commit eac1ca2928aafe321e92e5939d0c675cd56300ca
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 23 Aug 2026 00:25:10 -0700
+
+ka9q-radio (2026.08.22-1-trixie1) trixie; urgency=medium
+
+  * commit a6de18880c566ed0e1ed17de004654fb4b72ff22
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 21 Aug 2026 17:19:56 -0700
+
+ka9q-radio (2026.08.20-1-trixie1) trixie; urgency=medium
+
+  * commit ca93961df2b717f16f10786f806445cbd9b9ba59
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 19 Aug 2026 23:56:41 -0700
+
+ka9q-radio (2026.08.18-2-trixie1) trixie; urgency=medium
+
+  * commit e92205f9aa0305fe3206ecbd51c0fc5d8d24734a
+  * udev serial number fix
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 18 Aug 2026 01:19:29 -0700
+
+ka9q-radio (2026.08.18-1-trixie1) trixie; urgency=medium
+
+  * commit e5f790dd494a492fc298dfe93dd1a4fd3a0c9450
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 17 Aug 2026 23:46:35 -0700
+
+ka9q-radio (2026.08.17-2-trixie1) trixie; urgency=medium
+
+  * commit e4f1387f04749beccd33f651af8ab7b85aee16a6
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 16 Aug 2026 21:13:17 -0700
+
+ka9q-radio (2026.08.17-1-trixie1) trixie; urgency=medium
+
+  * commit 98211b47554cb73944271fbbdaceceab66ac605c
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 16 Aug 2026 17:18:48 -0700
+
+ka9q-radio (2026.08.15-2-trixie1) trixie; urgency=medium
+
+  * commit e86a4743d66980ce284292d0cdd643fbcf795c35
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 15 Aug 2026 12:23:01 -0700
+
+ka9q-radio (2026.08.15-1-trixie1) trixie; urgency=medium
+
+  * commit c2a4e17c86c0b56515d36e7052c63a39502e0127
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 14 Aug 2026 20:40:05 -0700
+
+ka9q-radio (2026.08.14-1-trixie1) trixie; urgency=medium
+
+  * commit cc4a63b18e2ebe774f3e10003e04b8efa7308fdd
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 14 Aug 2026 01:44:59 -0700
+
+ka9q-radio (2026.08.12-1-trixie1) trixie; urgency=medium
+
+  * commit 654fda5e5b70096daac3e5a14e48ff4f8bbaee05
+  * idle demod
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 12 Aug 2026 03:56:42 -0700
+
+ka9q-radio (2026.08.10-1-trixie1) trixie; urgency=medium
+
+  * commit ed4098d579367f5b3c4828a68e6875ecdae1eb60
+    major rewrites of starting up and channel creation/deletion
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 10 Aug 2026 01:10:19 -0700
+
+ka9q-radio (2026.08.06-1-trixie1) trixie; urgency=medium
+
+  * commit e1d675e6d8afb50ec4781702f7eeb72ca2f91d31
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 05 Aug 2026 19:54:58 -0700
+
+ka9q-radio (2026.08.05-3-trixie1) trixie; urgency=medium
+
+  * commit 49774eadb98e00dd3361a6d4a7ee11fd37064b71
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 05 Aug 2026 11:49:33 -0700
+
+ka9q-radio (2026.08.05-2-trixie1) trixie; urgency=medium
+
+  * commit 3c545a8776e8340a028130c27a60bac19b925b5c
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 05 Aug 2026 03:43:31 -0700
+
+ka9q-radio (2026.08.05-1-trixie1) trixie; urgency=medium
+
+  * commit 41c1acd8cb72ad38fd5bf79594dd8753ff8399e3
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 05 Aug 2026 02:47:12 -0700
+
+ka9q-radio (2026.08.04-1-trixie1) trixie; urgency=medium
+
+  * commit 4335df3d22a9e3e2d51cf9ba4b3fd8d02df0f4da
+  * add a few more udev rules and configs for launch of radiod
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 04 Aug 2026 00:47:12 -0700
+
+ka9q-radio (2026.08.03-5-trixie2) trixie; urgency=medium
+
+  * commit 1a6d3fe464d72831449e004862ae22b892648bf1
+  * debian cleanups, more radiod udev launch examples
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 03 Aug 2026 22:14:03 -0700
+
+ka9q-radio (2026.08.03-5-trixie1) trixie; urgency=medium
+
+  * commit 89b9592fab4765dac7dc702cf974782b438116a6
+  * don't make audio output network errors fatal, just log once
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 03 Aug 2026 19:07:16 -0700
+
+ka9q-radio (2026.08.03-4-trixie1) trixie; urgency=medium
+
+  * commit cf051d5fafc6110c8a358bceeaf2b19ec70bd56b
+  * allow lower case serial numbers in airspy
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 03 Aug 2026 18:36:01 -0700
+
+ka9q-radio (2026.08.03-3-trixie1) trixie; urgency=medium
+
+  * commit 3364339470975be2784d6a75e89500548b63219b
+  * lower-case start-ka9q-radio args
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 03 Aug 2026 18:16:06 -0700
+
+ka9q-radio (2026.08.03-2-trixie2) trixie; urgency=medium
+
+  * commit 9effb7e1263c989474f99ae9255da4154ffa0f92
+  * shuffle some directory creations
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 03 Aug 2026 15:24:06 -0700
+
+ka9q-radio (2026.08.03-2-trixie1) trixie; urgency=medium
+
+  * commit f3209417051d892eeb30b9f124348da3b1ddf35f
+  * have airspyhf read serial number from radiod command line
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 03 Aug 2026 15:07:25 -0700
+
+ka9q-radio (2026.08.03-1-trixie2) trixie; urgency=medium
+
+  * move some udev files between packages
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 03 Aug 2026 14:46:21 -0700
+
+ka9q-radio (2026.08.03-1-trixie1) trixie; urgency=medium
+
+  * commit 796810e64cce91164a113173ab4851c09a5850d1
+  * udev-driven radiod loading
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 03 Aug 2026 14:09:16 -0700
+
+ka9q-radio (2026.08.02-2-trixie1) trixie; urgency=medium
+
+  * commit 1a974c18abb75480fa4c7eda6a62009beda28044
+  * misc include and library dependency fixes from techn0mad
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 02 Aug 2026 15:57:09 -0700
+
+ka9q-radio (2026.08.02-1-trixie1) trixie; urgency=medium
+
+  * commit ca620bcfbd77bd91d7823c7b6891f004737472a1
+  * tighten set_filter()
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 02 Aug 2026 14:31:24 -0700
+
+ka9q-radio (2026.08.01-1-trixie1) trixie; urgency=medium
+
+  * commit 641647ac55e3d7955df1e7291e97a99632fb9c97
+  * fix -c option to powers.c
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 31 Jul 2026 19:35:28 -0700
+
+ka9q-radio (2026.07.30-2-trixie1) trixie; urgency=medium
+
+  * commit 504572e1505d0e9a7f4d86c9f536e20ac12f593a
+  * AI6VN patches to control channel sorting, affinity peer cpu core lists
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 30 Jul 2026 00:52:13 -0700
+
+ka9q-radio (2026.07.30-1-trixie1) trixie; urgency=medium
+
+  * commit 6e16e2612e8d27301ad3f5615676124060652e65
+  * rx888 sample drop monitoring
+  * fix memory leak in filter setting
+ -- Phil Karn <karn@ka9q.net>  Wed, 29 Jul 2026 23:06:57 -0700
+
+ka9q-radio (2026.07.28-1-trixie1) trixie; urgency=medium
+
+  * commit d7763b755ac76e1509babf6265ec14c1367696ed
+  * improve powers.c for long integrations
+  * harden spectrum demod against bad params
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 27 Jul 2026 22:30:20 -0700
+
+ka9q-radio (2026.07.27-1-trixie1) trixie; urgency=medium
+
+  * perform spectral averaging in forward direction
+  * limit wideband spectral averaging to A/D data on hand
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 26 Jul 2026 22:58:23 -0700
+
+ka9q-radio (2026.07.25-1-trixie1) trixie; urgency=medium
+
+  * create radio user and group, apply a bunch of PRs
+  * see git commit 267a10e15349277e3b590c4b48099e267d5e9f28
+  * Claude code review from N4HY (incomplete) - many small fixes and hardening
+  * add blade-rf udev rules
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 24 Jul 2026 19:29:30 -0700
+
+ka9q-radio (2026.07.24-1-trixie1) trixie; urgency=medium
+
+  * Add -O/--overlap and -a/--average options to powers.c
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 24 Jul 2026 00:34:29 -0700
+
+ka9q-radio (2026.07.23-4-trixie1) trixie; urgency=medium
+
+  * adjust spectrum starting point only if inverted
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 23 Jul 2026 12:21:16 -0700
+
+ka9q-radio (2026.07.23-3-trixie1) trixie; urgency=medium
+
+  * apply nyquist shift to inverted spectrum...
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 23 Jul 2026 03:37:49 -0700
+
+ka9q-radio (2026.07.23-2-trixie1) trixie; urgency=medium
+
+  * powers.c: set channel lifetime to twice the poll interval
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 23 Jul 2026 02:02:12 -0700
+
+ka9q-radio (2026.07.23-1-trixie1) trixie; urgency=medium
+
+  * fix longstanding bug causing spectral inversion with high-side LO front ends
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 23 Jul 2026 01:29:57 -0700
+
+ka9q-radio (2026.07.22-1-trixie1) trixie; urgency=medium
+
+  * redo si5351 solver to work with floating point references and outputs
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 22 Jul 2026 02:30:46 -0700
+
+ka9q-radio (2026.07.13-1-trixie1) trixie; urgency=medium
+
+  * create ka9q-radio-repeater package, only supported on arm64
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 13 Jul 2026 02:08:56 -0700
+
+ka9q-radio (2026.07.10-1-trixie1) trixie; urgency=medium
+
+  * add to channel option keyword list, sort
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 09 Jul 2026 22:47:05 -0700
+
+ka9q-radio (2026.07.05-1-trixie1) trixie; urgency=medium
+
+  * tighten guards on status packet processing
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 05 Jul 2026 12:24:50 -0700
+
+ka9q-radio (2026.07.04-1-trixie1) trixie; urgency=medium
+
+  * guard against filter creation with zero length output (caused looping)
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 04 Jul 2026 11:53:02 -0700
+
+ka9q-radio (2026.06.25-2-trixie1) trixie; urgency=medium
+
+  * appending ',all' to multicast addresses/names joins every mcast capable interface
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 25 Jun 2026 13:01:43 +0200
+
+ka9q-radio (2026.06.25-1-trixie1) trixie; urgency=medium
+
+  * remove CHU frequencies from radiod config examples
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 25 Jun 2026 00:22:02 +0200
+
+ka9q-radio (2026.06.24-3-trixie1) trixie; urgency=medium
+
+  * kick systemctl daemon-reload when reinstalling radiod
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 24 Jun 2026 05:25:51 -0700
+
+ka9q-radio (2026.06.24-2-forky1) forky; urgency=medium
+
+  * emit status messages 4/frame time (vs 2) in response to poll to ssrc 0xffffffff
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 24 Jun 2026 03:57:24 -0700
+
+ka9q-radio (2026.06.19-2-trixie1) trixie; urgency=medium
+
+  * Build on the right git branch this time...
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 18 Jun 2026 23:47:43 -0700
+
+ka9q-radio (2026.06.19-1-trixie1) trixie; urgency=medium
+
+  * fft-internal-threads=0 will non-threaded FFTW
+  * fft-internal-threads=1 is still default: use threaded FFTW with N=1
+    wisdom is not compatible between them even with N=1
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 18 Jun 2026 22:34:31 -0700
+
+ka9q-radio (2026.06.12-1-trixie1) trixie; urgency=medium
+
+  * use pclose to match popen in sig_gen.c
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 11 Jun 2026 19:21:14 -0700
+
+ka9q-radio (2026.06.11-1-trixie1) trixie; urgency=medium
+
+  * sig_gen cleanups; systemctl and udevadm only on local installs
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 11 Jun 2026 15:07:23 -0700
+
+ka9q-radio (2026.06.10-3-trixie1) trixie; urgency=medium
+
+  * turn off -march=native by default; re-enable with make NATIVE=1
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 10 Jun 2026 16:32:27 -0700
+
+ka9q-radio (2026.06.10-2-trixie1) trixie; urgency=medium
+
+  * harden audio output queuing, guard isfinite() with !isnan()
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 10 Jun 2026 03:05:06 -0700
+
+ka9q-radio (2026.06.10-1-trixie1) trixie; urgency=medium
+
+  * change to date-based version numbering; clean up string init in pcmrecord
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 09 Jun 2026 21:44:33 -0700
+
+ka9q-radio (1.1.9-1-trixie1) trixie; urgency=medium
+
+  * remove unnecessary sleeps from rx888 driver
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 03 Jun 2026 15:06:07 -0700
+
+ka9q-radio (1.1.8-2-noble1) noble; urgency=medium
+
+  * further fixes for config file tests
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 02 Jun 2026 12:48:05 -0700
+
+ka9q-radio (1.1.8-1-noble1) noble; urgency=medium
+
+  * fix postinst test for existing radiod config files
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 02 Jun 2026 12:29:20 -0700
+
+ka9q-radio (1.1.8-0-noble1) noble; urgency=medium
+
+  * read and log rx888 firmware version at startup
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 02 Jun 2026 11:24:31 -0700
+
+ka9q-radio (1.1.7-0-trixie1) trixie; urgency=medium
+
+  * make default rx888 firmware image in rx888 plugin "", which
+    bypasses radiod search for unloaded rx888s. Let rx888_boot handle them.
+    Note: may require removing firmware= entry in radiod config file
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 30 May 2026 15:40:14 -0700
+
+ka9q-radio (1.1.5-0-trixie2) trixie; urgency=medium
+
+  * change default rx888 firmware image in rx888 plugin to W1EUJ_0.1.0_FX3.img
+    note: this is usually overridden by the standalone rx888_boot, which is configured by
+    /etc/radio/rx888_bootfile.conf (which also points to W1EUJ_0.1.0_FX3.img)
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 30 May 2026 15:40:03 -0700
+
+ka9q-radio (1.1.4-0-trixie) trixie; urgency=medium
+
+  * use rx888 firmware image W1EUJ_0.1.0_FX3.img
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 30 May 2026 12:47:06 -0700
+
+ka9q-radio (1.1.3-0-trixie1) trixie; urgency=medium
+
+  * wd-record rtp rollover fix
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 28 May 2026 10:22:03 -0700
+
+ka9q-radio (1.1.2-0-trixie1) trixie; urgency=medium
+
+  * harden assert checks; powers fix; more fft-gen cleanup; clean bitrot in rtlsdr, funcube
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 28 May 2026 09:49:29 -0700
+
+ka9q-radio (1.1.1-0-trixie1) trixie; urgency=medium
+
+  * clean up fft-gen, move to ka9q-radio-common
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 27 May 2026 16:25:18 -0700
+
+ka9q-radio (1.1.0-0-trixie1) trixie; urgency=medium
+
+  * stop A/D converter when no channels
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 26 May 2026 15:35:08 -0700
+
+ka9q-radio (1.0.10-1~trixie1) trixie; urgency=medium
+
+  * create user and group 'radio' in ka9q-radio-common postinst
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 17 May 2026 15:21:17 -0700
+
+ka9q-radio (1.0.10~trixie1) trixie; urgency=medium
+
+  * set fallback wisdom file path in filter.c for packetd, which wasn't setting it
+  * fix potential buffer overrun in ax25.c
+
+ -- Phil Karn <karn@ka9q.net>  Sat, 16 May 2026 08:10:54 -0700
+
+ka9q-radio (1.0.5~trixie1) trixie; urgency=medium
+
+  * built for trixie on amd64
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 14 May 2026 14:30:57 -0700
+
+ka9q-radio (1.0.3) ka9q; urgency=medium
+
+  * fft-gen writes architecture-specific fftw3 wisdom files (wisdom-fftw-3.3.10-neon-threaded)
+  * fft-gen and filter read both generic and architecture-specific
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 14 May 2026 00:13:54 -0700
+
+ka9q-radio (1.0.2-2) ka9q; urgency=medium
+
+  * fix ka9q-radio.postinst
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 13 May 2026 22:58:54 -0700
+
+ka9q-radio (1.0.2-1) ka9q; urgency=medium
+
+  * relax driver module dependencies; radiod depends on them but not vice versa
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 13 May 2026 22:39:54 -0700
+
+ka9q-radio (1.0.2) ka9q; urgency=medium
+
+  * hydrasdr driver now uses libhydrasdr v1.1.2 features (ADC width)
+  * hydrasdr start log messages cleanup
+
+ -- Phil Karn <karn@ka9q.net>  Wed, 13 May 2026 22:13:26 -0700
+
+ka9q-radio (1.0.0-29) ka9q; urgency=medium
+
+  * check for both /etc/radio/*.conf and /etc/radio/radio*.conf.d to bypass setup
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 12 May 2026 16:45:23 -0700
+
+ka9q-radio (1.0.0-28) ka9q; urgency=medium
+
+  * hydrasdr support all sample formats, use new gain API
+
+ -- Phil Karn <karn@ka9q.net>  Tue, 12 May 2026 15:22:07 -0700
+
+ka9q-radio (1.0.0-27) ka9q; urgency=medium
+
+  * restart systemd services after an upgrade
+
+ -- Phil Karn <karn@ka9q.net>  Mon, 11 May 2026 00:27:44 -0700
+
+ka9q-radio (1.0.0-26) ka9q; urgency=medium
+
+  * Don't create a skeletal radiod config file if any already exist
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 10 May 2026 21:09:19 -0700
+
+ka9q-radio (1.0.0-25) ka9q; urgency=medium
+
+  * change sockaddr to sockaddr_storage in declarations
+  * add postinst rules to kick udev and/or systemd when needed
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 10 May 2026 20:50:53 -0700
+
+ka9q-radio (1.0.0-23) ka9q; urgency=medium
+
+  * have ka9q-radio-hfdl create /etc/radio/hfdl.conf to link to
+    new packaged dumphfdl
+
+ -- Phil Karn <karn@ka9q.net>  Sun, 10 May 2026 03:05:08 -0700
+
+ka9q-radio (1.0.0-22) ka9q; urgency=medium
+
+  * set exec permissions and insert shebangs in helper scrips
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 08 May 2026 04:18:35 -0700
+
+ka9q-radio (1.0.0-21) ka9q; urgency=medium
+
+  * fix module installation test
+  * revise dependencies
+  * more twiddling with device dependencies
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 08 May 2026 03:57:45 -0700
+
+ka9q-radio (1.0.0-18) ka9q; urgency=medium
+
+  * let each radiod device module install its own examples
+    in /usr/share/ka9q-radio/examples. Probably needs more cleanup.
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 08 May 2026 02:12:37 -0700
+
+ka9q-radio (1.0.0-17) ka9q; urgency=medium
+
+  * let ka9q-radio-recordings install their example files
+
+ -- Phil Karn <karn@ka9q.net>  Fri, 08 May 2026 01:17:07 -0700
+
+ka9q-radio (1.0.0-16) ka9q; urgency=medium
+
+  * move radiod sample config files to new package, ka9q-radio-config-examples
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 07 May 2026 22:55:26 -0700
+
+ka9q-radio (1.0.0-15) ka9q; urgency=medium
+
+  * add debconf scripts to generate a simple radiod config file
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 07 May 2026 20:52:12 -0700
+
+ka9q-radio (1.0.0-14) ka9q; urgency=medium
+
+  * revert packet drop count in monitor
+  * gate some less important warnings with Verbose
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 07 May 2026 15:40:37 -0700
+
+ka9q-radio (1.0.0-13) ka9q; urgency=medium
+
+  * loosen breaks/replace rules
+  * get rid of some unused variable warnings
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 07 May 2026 03:48:08 -0700
+
+ka9q-radio (1.0.0-12) ka9q; urgency=medium
+
+  * fix indentation on changelog entries - emacs screws it up
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 07 May 2026 03:17:57 -0700
+
+ka9q-radio (1.0.0-11) ka9q; urgency=medium
+
+  * don't let systemd terminate radiod on an unplugged SDR just yet;
+    this will await udev-triggering. Revert to retrying
+    every 5 sec as long as the unit is enabled.
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 07 May 2026 03:12:40 -0700
+
+ka9q-radio (1.0.0-10) ka9q; urgency=medium
+
+  * Remove capabilities from radiod binary, let systemd do it
+  * fix call to prctl()
+ -- Phil Karn <karn@ka9q.net>  Thu, 07 May 2026 02:44:32 -0700
+
+ka9q-radio (1.0.0-9) ka9q; urgency=medium
+  * Initial private release, git tag 1.0.0
+
+ -- Phil Karn <karn@ka9q.net>  Thu, 07 May 2026 01:43:40 -0700
+

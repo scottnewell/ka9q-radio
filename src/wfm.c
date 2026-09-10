@@ -1,0 +1,294 @@
+// Wideband FM demodulation
+// Copyright 2020-2025, Phil Karn, KA9Q
+// Still needs some work, e.g., cascaded filter restructuring
+#include <assert.h>
+#include <pthread.h>
+#include <string.h>
+#include <math.h>
+#include <complex.h>
+#include <fftw3.h>
+
+#include "misc.h"
+#include "filter.h"
+#include "iir.h"
+#include "radio.h"
+#include "status.h"
+#include "sched.h"
+
+// Forced sample rates; config file values are ignored for now
+// The audio output sample rate can probably eventually be made configurable,
+// but the composite sample rate needs to handle the bandwidth
+
+static int const Audio_samprate = FULL_SAMPRATE;
+//static int const Composite_samprate = 8 * FULL_SAMPRATE;
+static int const Composite_samprate = 256000; // lower to reduce CPU while keeping good margin on 200 kHz channel
+
+// FM demodulator thread
+int demod_wfm(void *arg){
+  assert(arg != NULL);
+  chan_t * const chan = arg;
+  if(chan == NULL)
+    return -1;
+
+  assert(Blocktime != 0);
+  // This is not the downconverter samprate, but the audio output samprate so as not to confuse consumers
+  chan->output.samprate = (int)Audio_samprate;
+  {
+    // Channel filter bandwidth is not the output sample rate
+    int const blocksize = lrint(Composite_samprate * Blocktime);
+    if(create_filter_output(&chan->filter.out,&chan->frontend->in,blocksize,COMPLEX) != 0){
+      chan->demod_type = INVALID_DEMOD;
+      return -1;
+    }
+  }
+  if(chan->output.channels == 0)
+    chan->output.channels = 2; // Default to stereo
+  chan->fm.stereo_enable = (chan->output.channels == 2); // note boolean assignment
+  chan->squelch.snr_enable = true; // implicitly on
+
+  // Make these blocksizes depend on front end sample rate and blocksize
+  int const composite_L = lrint(Composite_samprate * Blocktime); // Intermediate sample rate
+  int const composite_M = composite_L + 1; // 2:1 overlap (50%)
+  int const composite_N = composite_L + composite_M - 1;
+
+  // output forced to 48 kHz for now
+  const int audio_L = lrint(Audio_samprate * Blocktime);
+  if(composite_L < audio_L)
+    goto quit; // Front end sample rate is too low - should probably fix filter to allow interpolation
+
+  set_filter(&chan->filter.out,
+	     chan->filter.min_IF/Composite_samprate,
+	     chan->filter.max_IF/Composite_samprate,
+	     chan->filter.kaiser_beta);
+
+  double phase_memory = 0;  // Demodulator input phase memory
+  int squelch_state = 0; // Number of blocks for which squelch remains open
+
+  // Composite signal 50 Hz - 15 kHz contains mono (L+R) signal
+  struct filter_in composite = {0}; // when debugging, must be zeroes
+  create_filter_input(&composite,composite_L,composite_M,REAL);
+  composite.perform_inline = true;  // don't use job queue
+
+  assert(composite.ilen == chan->filter.out.olen);
+  // Composite filters, decimate from 384 Khz to 48 KHz
+  struct filter_out mono = {0};
+  create_filter_output(&mono,&composite,audio_L, REAL);
+  set_filter(&mono,50.0/Audio_samprate, 15000.0/Audio_samprate, chan->filter.kaiser_beta);
+
+  // Narrow filter at 19 kHz for stereo pilot
+  // FCC says +/- 2 Hz, with +/- 20 Hz protected (73.322)
+  struct filter_out pilot = {0};
+  create_filter_output(&pilot,&composite,audio_L, COMPLEX);
+  set_filter(&pilot,-100./Audio_samprate, 100./Audio_samprate, chan->filter.kaiser_beta);
+
+  // Stereo difference (L-R) information on DSBSC carrier at 38 kHz
+  // Extends +/- 15 kHz around 38 kHz
+  struct filter_out lminusr = {0};
+  create_filter_output(&lminusr,&composite,audio_L, COMPLEX);
+  set_filter(&lminusr,-15000./Audio_samprate, 15000./Audio_samprate, chan->filter.kaiser_beta);
+
+  // The asserts should be valid for clean sample rates multiples of 200 Hz
+  // If not, then a mop-up oscillator has to be provided
+  int pilot_shift = 1;
+  double pilot_remainder = 1; // force assertion fail if compute_tuning fails
+  compute_tuning(composite_N,composite_M,Composite_samprate,&pilot_shift,&pilot_remainder,19000.);
+  assert((pilot_shift % 4) == 0 && pilot_remainder == 0);
+
+  int subc_shift = 1;
+  double subc_remainder = 1;
+  compute_tuning(composite_N,composite_M,Composite_samprate,&subc_shift,&subc_remainder,38000.);
+  assert((subc_shift % 4) == 0 && subc_remainder == 0);
+
+  double const alpha = -expm1(-Blocktime * 1.0); // 1 sec time constant smoother
+  double complex stereo_deemph = 0;
+  double mono_deemph = 0;
+  bool response_needed = false;
+  bool restart_needed = false;
+  realtime(chan->prio);
+  while(!restart_needed){
+    response(chan,response_needed);
+    response_needed = false;
+
+    pthread_mutex_lock(&chan->status.lock);
+    // Look on the command queue and grab just one atomically
+    for(int i=0;i < CQLEN; i++){
+      if(chan->commands[i].buffer != NULL){
+	restart_needed = decode_radio_commands(chan,chan->commands[i].buffer,
+					       chan->commands[i].length);
+	FREE(chan->commands[i].buffer);
+	chan->commands[i].length = 0;
+	response_needed = true;
+	break;
+      }
+    }
+    pthread_mutex_unlock(&chan->status.lock);
+    int r;
+    if(restart_needed || (r = downconvert(chan)) == -1)
+      break; // restart or terminate
+    else if(r == 1)
+      continue; // channel inactive; poll for commands
+
+    // r == 0 is normal return
+    // Power squelch - don't bother with variance squelch
+    double const snr = (chan->sig.bb_power / (chan->sig.n0 * fabs(chan->filter.max_IF - chan->filter.min_IF))) - 1;
+    chan->fm.snr = max(0.0,snr); // Smoothed values can be a little inconsistent
+
+    // Hysteresis
+    int const squelch_state_max = chan->squelch.tail + 1;
+    if(chan->fm.snr >= chan->squelch.open || (squelch_state > 0 && snr >= chan->squelch.close))
+      // Squelch is fully open
+      // tail timing is in blocks (usually 10 or 20 ms each)
+      squelch_state = squelch_state_max;
+    else if(--squelch_state > 0){
+      // In tail, squelch still open
+    } else {
+      squelch_state = 0; // Squelch closed
+      phase_memory = 0;
+      chan->output.power = 0;
+      send_output(chan,NULL,audio_L,true); // Keep track of timestamps and mute state
+      continue;
+    }
+    // Actual FM demodulation
+    float complex const * restrict const buffer = chan->filter.out.output.c; // Working buffer
+    for(int n=0; n < composite_L; n++){
+      // Although deviation can be zero, argf() is defined as returning 0, not NAN
+      double const np = cargpif(buffer[n]); // -1 to +1
+      assert(isfinite(np));
+      double const x = np - phase_memory;
+      phase_memory = np;
+      composite.input_write_pointer.r[n] = x > 1 ? x - 2 : x < -1 ? x + 2 : x; // reduce difference to -1 to +1
+    } // for(int n=0; n < composite_L; n++)
+    if(squelch_state == squelch_state_max){
+      // Squelch fully open; look at deviation peaks
+      double peak_positive_deviation = 0;
+      double peak_negative_deviation = 0;
+      double frequency_offset = 0;
+
+      for(int n=0; n < composite_L; n++){
+	frequency_offset += composite.input_write_pointer.r[n];
+	if(composite.input_write_pointer.r[n] > peak_positive_deviation)
+	  peak_positive_deviation = composite.input_write_pointer.r[n];
+	else if(composite.input_write_pointer.r[n] < peak_negative_deviation)
+	  peak_negative_deviation = composite.input_write_pointer.r[n];
+      }
+      frequency_offset *= Composite_samprate * 0.5 / composite_L;  // scale to Hz
+      // Update frequency offset and peak deviation, with smoothing
+      chan->sig.foffset += alpha * (frequency_offset - chan->sig.foffset);
+
+      // Remove frequency offset from deviation peaks and scale to full cycles
+      peak_positive_deviation *= Composite_samprate * 0.5;
+      peak_negative_deviation *= Composite_samprate * 0.5;
+      peak_positive_deviation -= chan->sig.foffset;
+      peak_negative_deviation -= chan->sig.foffset;
+      chan->fm.pdeviation = max(peak_positive_deviation,-peak_negative_deviation);
+    }
+    // Filter & decimate to audio output sample rate
+    write_rfilter(&composite,NULL,composite_L);  // Composite at 384 kHz
+    execute_filter_output(&mono,0);    // L+R composite at 48 kHz
+    // Compute audio output level
+    // Constant gain used by FM only; automatically adjusted by AGC in linear modes
+    // We do this in the loop because headroom and BW can change
+    // Force reasonable parameters if they get messed up or aren't initialized
+    chan->output.gain = (2 * chan->output.headroom * Composite_samprate) / fabs(chan->filter.min_IF - chan->filter.max_IF);
+
+    bool pilot_present = false;
+    if(chan->fm.stereo_enable){
+      // See if a subcarrier is present
+      // shift signs for pilot and subcarrier don't matter because the filters are real input with symmetric spectra
+      execute_filter_output(&pilot,pilot_shift); // pilot spun to 0 Hz, 48 kHz rate
+      // I really need a better pilot detector here so we'll switch back to mono without it
+      // Probably lock a PLL to it and look at the inphase/quadrature power ratio
+      double subc_amp = 0;
+      for(int n=0; n < audio_L; n++)
+	subc_amp += cnrmf(pilot.output.c[n]);
+
+      subc_amp /= audio_L;
+      chan->tp1 = subc_amp;
+      if(subc_amp > 1e-6) // empirical constant, test this some more
+	pilot_present = true;
+    }
+    if(pilot_present){
+      // Stereo multiplex processing
+      if(chan->output.channels != 2){
+	chan->output.channels = 2;
+	int pt = pt_from_info(Audio_samprate,chan->output.channels,chan->output.encoding); // make sure it's initialized
+	if(pt == -1){
+	  fprintf(stderr,"%s can't allocate payload type for samprate %'d, channels %d, encoding %d\n",
+		  chan->name,Audio_samprate,chan->output.channels,chan->output.encoding); // make sure it's initialized
+	  goto quit;
+	}
+	chan->output.rtp.type = pt;
+      }
+      execute_filter_output(&lminusr,subc_shift); // L-R composite spun down to 0 Hz, 48 kHz rate
+
+      float complex stereo_buffer[audio_L];
+      double output_energy = 0;
+      double const fm_gain = chan->fm.gain;
+      double const fm_rate = chan->fm.rate;
+      double const gain = chan->output.gain;
+      for(int n = 0; n < audio_L; n++){
+	double complex subc_phasor = pilot.output.c[n]; // 19 kHz pilot
+	subc_phasor = (subc_phasor * subc_phasor) / cnrm(subc_phasor); // square to 38 kHz and normalize
+	double const subc_info = 2.0f * __imag__ (conj(subc_phasor) * lminusr.output.c[n]); // Carrier is in quadrature
+	assert(isfinite(subc_info));
+	assert(isfinite(mono.output.r[n]));
+	// demultiplex: 2L = (L+R) + (L-R); 2R = (L+R) - (L-R)
+	// L+R = mono.output.r[n]; L-R = subc_info
+	// real(s) = L, imag(s) = R
+	double complex s = mono.output.r[n] + subc_info + I * (mono.output.r[n] - subc_info);
+	if(fm_rate < 1)
+	  s = stereo_deemph += fm_rate * (fm_gain * s - stereo_deemph);
+
+	stereo_buffer[n] = (float complex)(s * gain);
+	output_energy += cnrmf(stereo_buffer[n]);
+      }
+      // Halve power to get level per channel
+      chan->output.power = output_energy / (2 * audio_L);
+      if(send_output(chan,(const float *)stereo_buffer,audio_L,false) < 0)
+	break; // No output stream! Terminate
+    } else { // pilot_present == false
+      // Mono processing
+      if(chan->output.channels != 1){
+	chan->output.channels = 1;
+	int const pt = pt_from_info(Audio_samprate,chan->output.channels,chan->output.encoding); // make sure it's initialized
+	if(pt == -1){
+	  fprintf(stderr,"%s can't allocate payload type for samprate %'d, channels %d, encoding %d\n",
+		  chan->name,Audio_samprate,chan->output.channels,chan->output.encoding); // make sure it's initialized
+	  goto quit;
+	}
+	chan->output.rtp.type = pt;
+      }
+      double output_energy = 0;
+      double const gain = chan->output.gain;
+      if(chan->fm.rate < 1){
+	// Apply deemphasis
+	double const fm_rate = chan->fm.rate;
+	double const fm_gain = chan->fm.gain;
+	for(int n=0; n < audio_L; n++){
+	  mono_deemph += fm_rate * (fm_gain * mono.output.r[n] - mono_deemph);
+	  double const s = mono_deemph * gain;
+	  mono.output.r[n] = (float)s;
+	  output_energy += s * s;
+	}
+      } else {
+	for(int n=0; n < audio_L; n++){
+	  double const s = mono.output.r[n] * gain;
+	  output_energy += s * s;
+	  mono.output.r[n] = (float)s;
+	}
+      }
+      chan->output.power = output_energy / audio_L;
+      if(send_output(chan,mono.output.r,audio_L,false) < 0)
+	break; // No output stream! Terminate
+    }
+  }
+  response(chan,response_needed); // in case one is pending as we're restarting
+
+ quit:;
+  // filters unique to us
+  delete_filter_input(&composite);
+  delete_filter_output(&mono);
+  delete_filter_output(&lminusr);
+  delete_filter_output(&pilot);
+  return chan->demod_type == INVALID_DEMOD ? -1 : 0;
+}

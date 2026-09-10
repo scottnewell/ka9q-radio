@@ -1,0 +1,410 @@
+# -*- makefile -*-
+
+# Primary Linux makefile for ka9q-radio package
+# Copyright 2017-2025, Phil Karn, KA9Q
+# By default, builds release version
+# To build for debugging say "make BUILD=debug"
+
+.DEFAULT_GOAL := all
+BUILD ?= release
+NATIVE ?= 0
+ENABLE_ALL    ?= 0
+ifeq ($(ENABLE_ALL),1)
+	ENABLE_AIRSPY=1
+	ENABLE_AIRSPYHF=1
+	ENABLE_BLADERF=1
+	ENABLE_FOBOS=1
+	ENABLE_FUNCUBE=1
+	ENABLE_HACKRF=1
+	ENABLE_HYDRASDR=1
+	ENABLE_RTLSDR=1
+	ENABLE_RX888=1
+	ENABLE_SIG_GEN=1
+	ENABLE_SOAPY=1
+endif
+
+prefix        ?= /usr/local
+exec_prefix   ?= $(prefix)
+bindir        ?= $(exec_prefix)/bin
+sbindir       ?= $(exec_prefix)/sbin
+libdir        ?= $(exec_prefix)/lib
+datadir       ?= $(prefix)/share
+confdir	      ?= /etc/radio
+localstatedir ?= /var
+pkgdatadir    ?= $(datadir)/ka9q-radio
+pkglibdir     ?= $(libdir)/ka9q-radio
+statedir      ?= $(localstatedir)/lib/ka9q-radio
+
+UNAME_S := $(shell uname -s)
+
+CPPFLAGS ?=
+LDFLAGS  ?=
+INCLUDES ?=
+DOPTS    ?=
+SOFLAGS  ?=
+LDLIBS   ?=
+CC       ?= cc
+CFLAGS   ?=
+SOAPY_CFLAGS ?= $(shell pkg-config --cflags SoapySDR)
+SOAPY_LIBS   ?= $(shell pkg-config --libs SoapySDR)
+
+LDLIBS += -lm -lpthread
+
+ifdef SANITIZE
+     DOPTS += -fsanitize=address -fsanitize=undefined
+     LDFLAGS += -fsanitize=address -fsanitize=undefined
+endif
+
+ifeq ($(UNAME_S),Darwin)
+	# Auto-detect Homebrew or MacPorts
+	HOMEBREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+	ifneq ($(HOMEBREW_PREFIX),)
+		# Homebrew detected
+		INCLUDES += -I$(HOMEBREW_PREFIX)/include
+		LDFLAGS  += -L$(HOMEBREW_PREFIX)/lib
+		# gettext is keg-only in Homebrew, add explicit paths
+		GETTEXT_PREFIX := $(shell brew --prefix gettext 2>/dev/null)
+		ifneq ($(GETTEXT_PREFIX),)
+			INCLUDES += -I$(GETTEXT_PREFIX)/include
+			LDFLAGS  += -L$(GETTEXT_PREFIX)/lib
+		endif
+		# ncurses is keg-only in Homebrew, add explicit paths
+		NCURSES_PREFIX := $(shell brew --prefix ncurses 2>/dev/null)
+		ifneq ($(NCURSES_PREFIX),)
+			INCLUDES += -I$(NCURSES_PREFIX)/include
+			LDFLAGS  += -L$(NCURSES_PREFIX)/lib
+		endif
+	else
+		 # Fallback to MacPorts
+		INCLUDES += -I/opt/local/include
+		LDFLAGS  += -L/opt/local/lib
+	endif
+	LDLIBS += -lintl -liconv
+	SOFLAGS += -bundle -Wl,-undefined,dynamic_lookup
+else
+	# linux
+	LDLIBS += -lbsd -lrt
+	SOFLAGS += -shared
+endif
+
+IS_GCC_NOT_CLANG := $(shell \
+	$(CC) -dM -E - < /dev/null 2>/dev/null | \
+	awk '/__GNUC__/ { gcc=1 } /__clang__/ { clang=1 } END { if (gcc && !clang) print "yes" }')
+
+
+HAS_PIGPIO := $(shell printf '\043include <pigpio.h>\n' | $(CC) $(CPPFLAGS) -E - >/dev/null 2>&1 && echo 1)
+
+ifeq ($(BUILD),debug)
+     DOPTS += -g
+else
+     DOPTS += -DNDEBUG=1 -O3
+endif
+
+ifeq ($(NATIVE),1)
+ARCHOPTS = -march=native
+endif
+
+# do NOT set -ffast-math or -ffinite-math-only; NANs are widely used as 'variable not set' sentinels
+COPTS = -std=gnu11 -pthread -Wall -funsafe-math-optimizations -fno-math-errno -freciprocal-math -fno-trapping-math -ffp-contract=fast -Wextra -MMD -MP -fPIC
+# -fcx-limited-range is supposedly unsupported in clang, but I don't have that problem
+ifeq ($(IS_GCC_NOT_CLANG),yes)
+COPTS += -fcx-limited-range -D_GNU_SOURCE=1
+endif
+
+CFLAGS += $(DOPTS) $(ARCHOPTS) $(COPTS) $(INCLUDES)
+
+DAEMONS = aprs aprsfeed cwd packetd radiod wait-for-lan
+EXECS = ctcss control fft-gen jt-decoded metadump monitor opussend pcmrecord pcmsend powers tune wd-record
+
+## library elements
+LIBRADIO = misc.o multicast.o rtp.o config.o sched.o
+LIBDSP = filter.o iir.o window.o osc.o sincospi.o sincospif.o
+LIBSTATUS = status.o decode_status.o
+
+# radiod uses a lot of unique objects. It should probably move to its own directory
+RADIOD_OBJECTS = main.o audio.o avahi.o modes.o fm.o wfm.o linear.o spectrum.o radio.o n0.o radio_status.o rtcp.o libdsp.a libstatus.a libradio.a
+
+## source files for dependency generation (see DEPS=)
+# List every .c file in the tree so `-include $(DEPS)` picks up
+# header-change rebuild dependencies even for optional drivers
+# (bladerf, fobos, hackrf, hydrasdr, sdrplay, ...) whose targets
+# are gated by ENABLE_*.
+CFILES = airspy.c airspyhf.c aprs.c aprsfeed.c attr.c audio.c avahi.c avahi_browse.c ax25.c bandplan.c bladerf.c config.c control.c cwd.c decimate.c decode_status.c dump.c ezusb.c fcd.c fft-gen.c filter.c fm.c fobos.c funcube.c gauss.c hackrf.c hid-libusb.c hydrasdr.c iir.c jt-decoded.c linear.c main.c metadump.c misc.c modes.c monitor.c monitor-data.c monitor-display.c monitor-repeater.c morse.c multicast.c n0.c opusd.c opussend.c osc.c packetd.c pcmcat.c pcmrecord.c pcmsend.c pcmspawn.c ctcss.c powers.c radio.c radio_status.c rdsd.c rtcp.c rtlsdr.c rtp.c rx888.c rx888_boot.c sdrplay.c set_xcvr.c setfilt.c show-pkt.c show-sig.c si5351.c sig_gen.c spectrum.c status.c stereod.c sincospi.c sincospif.c tune.c wd-record.c wfm.c window.c
+
+HFILES = attr.h ax25.h bandplan.h conf.h config.h decimate.h defaults.h ezusb.h fcd.h fcdhidcmd.h filter.h hidapi.h iir.h misc.h monitor.h morse.h multicast.h osc.h radio.h rx888.h si5351.h status.h config_paths.h
+
+## hardware plug-in module enables
+# The software signal generator front end is build by default. Others are added by the ENABLE_* options below
+DYNAMIC_DRIVERS =
+
+# AIRSPY R2, etc
+ifeq ($(ENABLE_AIRSPY),1)
+   DYNAMIC_DRIVERS += airspy.so
+endif
+
+# AIRSPY HF+
+ifeq ($(ENABLE_AIRSPYHF),1)
+   DYNAMIC_DRIVERS += airspyhf.so
+endif
+
+# BLADERF
+ifeq ($(ENABLE_BLADERF),1)
+   DYNAMIC_DRIVERS += bladerf.so
+endif
+
+# Rigexpert Fobos SDR
+ifeq ($(ENABLE_FOBOS),1)
+   DYNAMIC_DRIVERS += fobos.so
+endif
+
+# Old AMSAT-UK Funcube dongle (my first SDR!)
+ifeq ($(ENABLE_FUNCUBE),1)
+   DYNAMIC_DRIVERS += funcube.so
+endif
+
+# HACK RF
+ifeq ($(ENABLE_HACKRF),1)
+   DYNAMIC_DRIVERS += hackrf.so
+endif
+
+# HydraSDR One
+ifeq ($(ENABLE_HYDRASDR),1)
+   DYNAMIC_DRIVERS += hydrasdr.so
+endif
+
+# cheap RTLSDR dongles
+ifeq ($(ENABLE_RTLSDR),1)
+   DYNAMIC_DRIVERS += rtlsdr.so
+endif
+
+# RX 888 MkII
+ifeq ($(ENABLE_RX888),1)
+   DYNAMIC_DRIVERS += rx888.so
+   DAEMONS += rx888_boot
+endif
+
+ifeq ($(ENABLE_SDRPLAY),1)
+   DYNAMIC_DRIVERS += sdrplay.so
+endif
+
+ifeq ($(ENABLE_SIG_GEN),1)
+   DYNAMIC_DRIVERS += sig_gen.so
+endif
+
+ifeq ($(ENABLE_SOAPY),1)
+   DYNAMIC_DRIVERS += soapy.so	
+endif
+
+ifeq ($(HAS_PIGPIO),1)
+   EXECS += set_xcvr
+endif
+
+.PHONY: clean all install uninstall dynamics purge
+all: $(DAEMONS) $(EXECS) $(DYNAMIC_DRIVERS)
+
+## other targets
+install: all
+	install -d -m 0755 $(DESTDIR)$(sbindir) $(DESTDIR)$(bindir) $(DESTDIR)$(pkglibdir)
+	if [ -n "$(DYNAMIC_DRIVERS)" ]; then install -m 0755 $(DYNAMIC_DRIVERS) $(DESTDIR)$(pkglibdir); fi
+	install -m 0755 $(DAEMONS) $(DESTDIR)$(sbindir)
+	install -m 0755 $(EXECS) $(DESTDIR)$(bindir)
+ifeq ($(strip $(DEB_BUILD_ARCH))$(UNAME_S),Linux)
+	setcap cap_net_admin+ep $(DESTDIR)$(bindir)/monitor
+endif
+
+clean:
+	rm -f *.o *.a *.d *.so config_paths.h $(DAEMONS) $(EXECS) $(DYNAMIC_DRIVERS)
+
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(sbindir)/,$(DAEMONS))
+	rm -f $(addprefix $(DESTDIR)$(bindir)/,$(EXECS))
+	rm -f $(addprefix $(DESTDIR)$(pkglibdir)/,$(DYNAMIC_DRIVERS))
+	-rmdir $(DESTDIR)$(pkglibdir) 2>/dev/null || true
+
+purge:
+	@test "$(CONFIRMED)" = "1" || { \
+	    echo "Refusing to run purge directly. Use top-level make purge."; \
+	    exit 1; \
+	}
+	if [ -n "$(DESTDIR)$(sbindir)" ]; then \
+		cd $(DESTDIR)$(sbindir) && rm -f $(DAEMONS); \
+	fi
+	if [ -n "$(DESTDIR)$(bindir)" ]; then \
+		cd $(DESTDIR)$(bindir) && rm -f $(EXECS); \
+	fi
+	if [ -n "$(DESTDIR)$(pkglibdir)" ]; then \
+		rm -rf $(DESTDIR)$(pkglibdir); \
+	fi
+
+# keep all .o files
+.SECONDARY:
+
+dynamics: $(DYNAMIC_DRIVERS)
+
+## Executables
+aprs: aprs.o ax25.o libdsp.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+aprsfeed: ax25.o aprsfeed.o libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+control: control.o bandplan.o modes.o avahi_browse.o libdsp.a libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -liniparser -lncursesw $(LDLIBS)
+
+ctcss: ctcss.o libdsp.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lfftw3f_threads -lfftw3f $(LDLIBS)
+
+cwd: cwd.o morse.o libdsp.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+fft-gen: fft-gen.o
+	$(CC) $(LDFLAGS) -o $@ $^  -lfftw3f_threads -lfftw3f  $(LDLIBS)
+
+jt-decoded: jt-decoded.o libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+metadump: metadump.o dump.o libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+monitor: monitor.o monitor-data.o monitor-display.o monitor-repeater.o morse.o database.o libdsp.a libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lopus -lportaudio `pkg-config --silence-errors --libs alsa` -lsamplerate -liniparser  -lncursesw -lcsv $(LDLIBS)
+
+opusd: opusd.o avahi.o libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lopus $(LDLIBS)
+
+opussend: opussend.o libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lopus -lportaudio $(LDLIBS)
+
+packetd: packetd.o ax25.o avahi.o libdsp.a libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lfftw3f_threads -lfftw3f $(LDLIBS)
+
+pcmcat: pcmcat.o libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+pcmspawn: pcmspawn.o libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+pcmrecord: pcmrecord.o attr.o libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lopus -logg $(LDLIBS)
+
+pcmsend: pcmsend.o libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lportaudio $(LDLIBS)
+
+powers: powers.o dump.o libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+radiod: $(RADIOD_OBJECTS)
+	$(CC) -rdynamic $(LDFLAGS) -o $@ $^ -lopus -lfftw3f_threads -lfftw3f -liniparser -lusb-1.0 -ldl $(LDLIBS)
+
+rdsd: rdsd.o avahi.o libdsp.a libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lfftw3f_threads -lfftw3f $(LDLIBS)
+
+rx888_boot: rx888_boot.o ezusb.o
+	$(CC) $(LDFLAGS) -o $@ $^ -lusb-1.0 $(LDLIBS)
+
+# not made unless we're on a rpi
+set_xcvr: set_xcvr.o libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lpigpio -liniparser $(LDLIBS)
+
+setfilt: setfilt.o libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+show-pkt: show-pkt.o libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lncursesw $(LDLIBS)
+
+show-sig: show-sig.o libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lncursesw $(LDLIBS)
+
+stereod: stereod.o avahi.o libdsp.a libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lfftw3f_threads -lfftw3f $(LDLIBS)
+
+tune: tune.o libstatus.a libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+wait-for-lan: wait-for-lan.o multicast.o misc.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+wd-record: wd-record.o libstatus.a attr.o libradio.a
+	$(CC) $(LDFLAGS) -o $@ $^ -lopus -logg $(LDLIBS)
+
+
+## Dynamically loaded modules for SDR front ends
+funcube.so: funcube.o fcd.o hid-libusb.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lportaudio -lusb-1.0 $(LDLIBS)
+
+rx888.so: rx888.o si5351.o ezusb.o hid-libusb.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lusb-1.0 $(LDLIBS)
+
+airspy.so: airspy.o airspy-unpack.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lairspy $(LDLIBS)
+
+airspyhf.so: airspyhf.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lairspyhf $(LDLIBS)
+
+hydrasdr.so: hydrasdr.o airspy-unpack.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lhydrasdr $(LDLIBS)
+
+rtlsdr.so: rtlsdr.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lrtlsdr $(LDLIBS)
+
+sdrplay.so: sdrplay.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lsdrplay_api $(LDLIBS)
+
+fobos.so: fobos.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lfobos $(LDLIBS)
+
+hackrf.so: hackrf.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lhackrf -lusb-1.0 $(LDLIBS)
+
+bladerf.so: bladerf.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lbladeRF $(LDLIBS)
+
+sig_gen.so: sig_gen.o gauss.o libradio.a
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ -lsamplerate $(LDLIBS)
+
+soapy.so: soapy.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $^ $(SOAPY_LIBS) $(LDLIBS)
+
+# subroutines useful in more than one program
+# subroutines useful in more than one program
+libradio.a: $(LIBRADIO)
+	ar rsv $@ $?
+
+libdsp.a: $(LIBDSP)
+	ar rsv $@ $?
+
+libstatus.a: $(LIBSTATUS)
+	ar rsv $@ $?
+
+ifeq ($(IS_GCC_NOT_CLANG),yes)
+monitor-data.o: CFLAGS += -Wno-clobbered
+endif
+
+soapy.o: CFLAGS += $(SOAPY_CFLAGS)
+
+# handle quotes inside GIT summary messages, etc. Suggested by ChatGPT
+esc = sed 's/\\/\\\\/g; s/"/\\"/g'
+config_paths.h: Makefile
+	echo "make $@"
+	@printf '#ifndef _CONFIG_PATHS_H\n' > $@
+	@printf '#define _CONFIG_PATHS_H 1\n' >> $@
+	@printf '#define CONFDIR "%s"\n' '$(confdir)' >> $@
+	@printf '#define STATEDIR "%s"\n' '$(statedir)' >> $@
+	@printf '#define PKGDATADIR "%s"\n' '$(pkgdatadir)' >> $@
+	@printf '#define PKGLIBDIR "%s"\n' '$(pkglibdir)' >> $@
+	@printf '#define GIT_HASH "%s"\n' "$$(git rev-parse HEAD | $(esc))" >> $@
+	@printf '#define GIT_TIME "%s"\n' "$$(git show -s --format=%ci | $(esc))" >> $@
+	@printf '#define GIT_BRANCH "%s"\n' "$$(git log --pretty=format:%d -n 1 | $(esc))" >> $@
+	@printf '#define GIT_SUMMARY "%s"\n' "$$(git log -1 --format=%s | $(esc))" >> $@
+	@printf '#define GIT_VERSION "%s"\n' "$$(git describe --always --dirty --tags | $(esc))" >> $@
+	@printf '#define GIT_REMOTE_URL "%s"\n' "$$(git remote get-url origin  | $(esc))" >> $@
+	@printf '#endif\n' >> $@
+
+%.so: %.o
+	$(CC) $(LDFLAGS) $(SOFLAGS) -o $@ $<
+
+%.o: %.c config_paths.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+DEPS = $(CFILES:.c=.d) $(OBJS:.o=.d)
+-include $(DEPS)

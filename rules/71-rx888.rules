@@ -1,0 +1,3 @@
+# 00F3 is the nominal unprogrammed device, 00F1 is the nominal programmed device. But Cypress forums say that
+
+SUBSYSTEM=="usb",ENV{DEVTYPE}=="usb_device",ATTRS{idVendor}=="04b4",ATTRS{idProduct}=="00f1",MODE:="0666",GROUP="plugdev", TAG+="uaccess"

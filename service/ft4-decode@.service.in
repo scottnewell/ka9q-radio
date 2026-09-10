@@ -1,0 +1,29 @@
+# Systemd unit to decode FT-4 in a spool directory
+# Phil Karn, KA9Q 9 Sept 2026
+# only needs the file system, not the network
+
+[Unit]
+Description=ft4-decode %i
+RequiresMountsFor=/var/lib/ka9q-radio/ft4
+
+[Service]
+Nice=10
+User=radio
+Group=radio
+Type=simple
+EnvironmentFile=/etc/radio/ft4-decode.conf
+PermissionsStartOnly=true
+StateDirectory=ka9q-radio/ft4
+StateDirectoryMode=0775
+StandardOutput=append:/var/log/ft4.log
+StandardError=journal
+WorkingDirectory=/var/lib/ka9q-radio/ft4
+ExecStart=@bindir@/decode_ft8 -4 $DIRECTORY
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+LogRateLimitBurst=200
+LogRateLimitIntervalSec=20
+
+[Install]
+WantedBy=multi-user.target
